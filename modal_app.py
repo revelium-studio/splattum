@@ -18,44 +18,24 @@ image = (
         "git", "wget", "ffmpeg", "libsm6", "libxext6", "libgl1-mesa-glx",
         "build-essential", "ninja-build"
     )
+    .run_commands(
+        # Clone DiffSplat repository first
+        "git clone https://github.com/chenguolin/DiffSplat.git /opt/diffsplat",
+        # Run DiffSplat setup (this installs dependencies including an older PyTorch)
+        "cd /opt/diffsplat && bash settings/setup.sh || true",
+    )
     .pip_install(
-        # PyTorch 2.4+ required by DiffSplat
+        # AFTER setup.sh, upgrade PyTorch to 2.4+ (required by DiffSplat)
         "torch==2.4.0",
         "torchvision==0.19.0",
-        # Core dependencies
-        "numpy",
-        "scipy",
-        "pillow",
-        "pillow-heif",
-        "plyfile",
-        "click",
-        "tqdm",
-        "timm",
-        "matplotlib",
-        "imageio",
-        "imageio-ffmpeg",
-        "huggingface_hub",
-        "fastapi",
-        # DiffSplat specific dependencies  
-        "transformers>=4.40.0,<5.0.0",  # Pin to avoid breaking changes
+        # Pin transformers to avoid the nn import bug
+        "transformers==4.44.0",
+        # Ensure other critical deps are correct versions
         "diffusers>=0.32.0",
         "accelerate",
-        "safetensors",
-        "omegaconf",
-        "einops",
-        "kiui>=0.2.10",  # For camera utilities and rendering
-        "rembg[gpu]",  # Background removal
-        "onnxruntime-gpu",
-        "pygltflib",
-        "trimesh",
-        "open3d",
-        "opencv-python",
-    )
-    .run_commands(
-        # Clone DiffSplat repository
-        "git clone https://github.com/chenguolin/DiffSplat.git /opt/diffsplat",
-        # Run DiffSplat setup
-        "cd /opt/diffsplat && bash settings/setup.sh || true",
+        "fastapi",
+        "rembg[gpu]",
+        "kiui>=0.2.10",
     )
     .env({"PYTHONPATH": "/opt/diffsplat:/opt/diffsplat/src:/opt/diffsplat/extensions"})
 )
