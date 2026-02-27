@@ -1,0 +1,9 @@
+# Ignore generated files
+public/outputs
+public/uploads
+.jobs
+
+# Development files
+.next
+node_modules
+

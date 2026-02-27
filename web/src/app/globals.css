@@ -1,0 +1,285 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: 'HK Guise';
+  src: url('https://fonts.cdnfonts.com/s/29136/HKGuise-Regular.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'HK Guise';
+  src: url('https://fonts.cdnfonts.com/s/29136/HKGuise-Medium.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'HK Guise';
+  src: url('https://fonts.cdnfonts.com/s/29136/HKGuise-SemiBold.woff') format('woff');
+  font-weight: 600;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'HK Guise';
+  src: url('https://fonts.cdnfonts.com/s/29136/HKGuise-Bold.woff') format('woff');
+  font-weight: 700;
+  font-style: normal;
+}
+
+:root {
+  --background: #EEEEEE;
+  --foreground: #1a1a1a;
+  --card: #ffffff;
+  --card-hover: #fafafa;
+  --border: #e5e5e5;
+  --border-strong: #d4d4d4;
+  --muted: #737373;
+  --muted-light: #a3a3a3;
+  --accent: #0B0B0B;
+  --accent-light: #404040;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-hover: var(--card-hover);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-muted: var(--muted);
+  --color-muted-light: var(--muted-light);
+  --color-accent: var(--accent);
+  --color-accent-light: var(--accent-light);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: 'HK Guise', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+/* Upload zone */
+.upload-zone {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.upload-zone:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+}
+
+.upload-zone.dragging {
+  border-color: var(--accent);
+  background: var(--card-hover);
+  transform: scale(1.005);
+}
+
+/* Button styles */
+.btn-primary {
+  background: var(--accent);
+  color: white;
+  font-family: 'HK Guise', sans-serif;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.btn-primary:hover {
+  background: var(--accent-light);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-secondary {
+  background: var(--card);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  font-family: 'HK Guise', sans-serif;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.btn-secondary:hover {
+  background: var(--card-hover);
+  border-color: var(--border-strong);
+}
+
+/* Panel styles */
+.panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.panel-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+/* Slider styles */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+  border: none;
+}
+
+/* Controls overlay */
+.controls-overlay {
+  background: linear-gradient(to top, rgba(255, 255, 255, 0.95), transparent);
+}
+
+/* Loading animation */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Fade in animation */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.4s ease-out forwards;
+}
+
+/* Icon button */
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  transition: all 0.2s ease;
+}
+
+.icon-btn:hover {
+  background: var(--card-hover);
+  border-color: var(--border-strong);
+  color: var(--foreground);
+}
+
+/* Toggle */
+.toggle {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background: var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.toggle.active {
+  background: var(--accent);
+}
+
+.toggle::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.toggle.active::after {
+  transform: translateX(20px);
+}
