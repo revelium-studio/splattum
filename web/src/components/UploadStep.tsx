@@ -85,7 +85,7 @@ export default function UploadStep({
             className="h-4 sm:h-10 mx-auto mb-3 sm:mb-4 w-auto"
           />
           {/* Subtitle */}
-          <p className="text-muted text-base sm:text-lg font-medium">DiffSplat</p>
+          <p className="text-muted text-base sm:text-lg font-medium">AnySplat</p>
         </motion.div>
       </header>
 
@@ -210,7 +210,7 @@ export default function UploadStep({
       <footer className="py-4 sm:py-6 text-center px-4 sm:px-0">
         <div className="w-[90%] sm:w-1/2 mx-auto">
           <p className="text-[10px] font-medium opacity-50 leading-tight sm:leading-relaxed">
-            Disclaimer. This demo uses the DiffSplat model (chenguolin/DiffSplat) under the MIT license for 3D Gaussian Splat generation. All outputs are experimental and provided "as is." You are solely responsible for any use of the results. By uploading images, you confirm you have the necessary rights and that your content does not violate any laws or third-party rights.
+            Disclaimer. This demo uses the AnySplat model ([InternRobotics/AnySplat](https://github.com/InternRobotics/AnySplat), [lhjiang/anysplat](https://huggingface.co/lhjiang/anysplat)) for 3D Gaussian Splat generation. All outputs are experimental and provided "as is." You are solely responsible for any use of the results. By uploading images, you confirm you have the necessary rights and that your content does not violate any laws or third-party rights.
           </p>
         </div>
       </footer>

@@ -25,9 +25,13 @@ function corsResponse(response: NextResponse): NextResponse {
 const IS_VERCEL = process.env.VERCEL === "1";
 
 // Modal configuration for GPU processing (replacing RunPod)
-// Deploy modal_app.py and get the endpoint URLs
-const MODAL_ENDPOINT = process.env.MODAL_ENDPOINT || "https://revelium-studio--diffsplat-process-image-endpoint.modal.run";
-const MODAL_STATUS_ENDPOINT = process.env.MODAL_STATUS_ENDPOINT || "https://revelium-studio--diffsplat-get-job-status-endpoint.modal.run";
+// Deploy modal_app.py and get the endpoint URLs for AnySplat
+const MODAL_ENDPOINT =
+  process.env.MODAL_ENDPOINT ||
+  "https://revelium-studio--anysplat-process-image-endpoint.modal.run";
+const MODAL_STATUS_ENDPOINT =
+  process.env.MODAL_STATUS_ENDPOINT ||
+  "https://revelium-studio--anysplat-get-job-status-endpoint.modal.run";
 
 // Paths for local development
 const PROJECT_ROOT = path.resolve(process.cwd(), "..");
@@ -67,7 +71,7 @@ async function processWithModal(
   prompt: string = "",
   elevation: number = 20
 ): Promise<{ callId: string } | { plyBase64: string }> {
-  console.log(`🚀 Sending image to Modal DiffSplat endpoint...`);
+  console.log(`🚀 Sending image to Modal AnySplat endpoint...`);
   console.log(`📍 Modal endpoint: ${MODAL_ENDPOINT}`);
 
   const response = await fetch(MODAL_ENDPOINT, {
@@ -112,7 +116,7 @@ async function processWithModal(
   throw new Error("Unexpected response from Modal");
 }
 
-// Process locally with DiffSplat - for local dev (if set up)
+// Process locally with a 3D pipeline - for local dev (if set up)
 function processLocally(
   inputPath: string,
   outputDir: string,
@@ -121,8 +125,8 @@ function processLocally(
 ) {
   const venvActivate = path.join(PROJECT_ROOT, ".venv", "bin", "activate");
 
-  // Note: Local DiffSplat processing requires the full setup
-  // This is a placeholder - for local dev, you might want to use Modal directly
+  // Note: Local 3D processing requires the full setup
+  // This is a placeholder - for local dev, you might want to use Modal AnySplat directly
   const child = spawn(
     "bash",
     [
@@ -210,8 +214,8 @@ export async function POST(request: NextRequest) {
     const buffer = Buffer.from(bytes);
 
     if (IS_VERCEL) {
-      // Use Modal for GPU processing
-      console.log("🚀 Starting Modal DiffSplat processing (Vercel)...");
+      // Use Modal AnySplat for GPU processing
+      console.log("🚀 Starting Modal AnySplat processing (Vercel)...");
 
       const imageBase64 = buffer.toString("base64");
 
@@ -248,7 +252,7 @@ export async function POST(request: NextRequest) {
       }
     } else {
       // Local development - try to use Modal API directly
-      console.log("🚀 Using Modal API for local development...");
+      console.log("🚀 Using Modal AnySplat API for local development...");
       
       const imageBase64 = buffer.toString("base64");
       
@@ -271,7 +275,7 @@ export async function POST(request: NextRequest) {
       } catch (error) {
         console.error("❌ Modal API failed, falling back to local processing...", error);
         
-        // Fallback to local processing
+        // Fallback to local processing (non-Modal)
         await mkdir(UPLOADS_DIR, { recursive: true });
         await mkdir(OUTPUTS_DIR, { recursive: true });
 
@@ -290,7 +294,7 @@ export async function POST(request: NextRequest) {
           startTime: Date.now(),
         });
 
-        console.log("Starting local DiffSplat job:", jobId);
+        console.log("Starting local 3D job (non-Modal):", jobId);
         processLocally(inputPath, outputDir, jobId, file.name);
 
         return corsResponse(NextResponse.json({

@@ -248,7 +248,7 @@ export default function Home() {
     const formData = new FormData();
     formData.append("image", uploadedImage);
 
-    console.log("🚀 Starting image processing with DiffSplat...");
+    console.log("🚀 Starting image processing with LiftImage3D...");
 
     try {
       console.log("Submitting image for processing...");

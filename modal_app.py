@@ -1,7 +1,9 @@
 """
-Modal app for running DiffSplat model on GPU.
-DiffSplat: Repurposing Image Diffusion Models for Scalable 3D Gaussian Splat Generation
-https://github.com/chenguolin/DiffSplat (MIT License - Commercial use allowed)
+Modal app for running AnySplat on GPU.
+AnySplat: Feed-forward 3D Gaussian Splatting from Unconstrained Views
+Project page: https://city-super.github.io/anysplat/
+Code: https://github.com/InternRobotics/AnySplat
+Hugging Face: https://huggingface.co/lhjiang/anysplat
 
 Deploy with: modal deploy modal_app.py
 """
@@ -9,361 +11,228 @@ Deploy with: modal deploy modal_app.py
 import modal
 
 # Create the Modal app
-app = modal.App("diffsplat")
+app = modal.App("anysplat")
 
-# Define the container image with all dependencies for DiffSplat
+# AnySplat is developed for Python 3.10, PyTorch 2.2.0 and CUDA 12.1.
+# We start from NVIDIA's PyTorch image, then replace the preinstalled torch
+# with the exact 2.2.0/cu121 stack and install AnySplat + its dependencies.
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .apt_install(
-        "git", "wget", "ffmpeg", "libsm6", "libxext6", "libgl1-mesa-glx",
-        "build-essential", "ninja-build"
+    modal.Image.from_registry(
+        "nvcr.io/nvidia/pytorch:24.07-py3",  # PyTorch 2.4.0 + CUDA 12.5, Python 3.10
+        add_python=None,
+    )
+    .env(
+        {
+            "TORCH_CUDA_ARCH_LIST": "8.0",  # Optimise for A100
+            "DEBIAN_FRONTEND": "noninteractive",
+        }
     )
     .run_commands(
-        # Clone DiffSplat repository first
-        "git clone https://github.com/chenguolin/DiffSplat.git /opt/diffsplat",
-        # Run DiffSplat setup (this installs dependencies including an older PyTorch)
-        "cd /opt/diffsplat && bash settings/setup.sh || true",
+        # System dependencies: git + FFmpeg + basic GL for OpenCV / Open3D + build tools
+        "apt-get update && apt-get install -y "
+        "git ffmpeg libgl1-mesa-glx libglib2.0-0 "
+        "build-essential ninja-build cmake "
+        "&& rm -rf /var/lib/apt/lists/*",
+        # Clone AnySplat
+        "git clone https://github.com/InternRobotics/AnySplat.git /opt/anysplat",
+        # Replace preinstalled torch with the version AnySplat is built for
+        "pip uninstall -y torch torchvision torchaudio || true",
+        "pip install --no-cache-dir "
+        "torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 "
+        "--index-url https://download.pytorch.org/whl/cu121",
+        # Install AnySplat requirements (includes a prebuilt gsplat wheel for pt2.2/cu121)
+        "pip install --no-cache-dir -r /opt/anysplat/requirements.txt",
     )
-    .pip_install(
-        # AFTER setup.sh, upgrade PyTorch to 2.4+ (required by DiffSplat)
-        "torch==2.4.0",
-        "torchvision==0.19.0",
-        # xformers compatible with PyTorch 2.4
-        "xformers==0.0.27.post2",
-        # Pin transformers to avoid the nn import bug
-        "transformers==4.44.0",
-        # Missing dependencies
-        "wandb",
-        # Ensure other critical deps are correct versions
-        "diffusers>=0.32.0",
-        "accelerate",
-        "fastapi",
-        "rembg[gpu]",
-        "kiui>=0.2.10",
-    )
-    .env({"PYTHONPATH": "/opt/diffsplat:/opt/diffsplat/src:/opt/diffsplat/extensions"})
 )
 
-# Create a volume for caching the models
-volume = modal.Volume.from_name("diffsplat-model-cache", create_if_missing=True)
+# Volume for caching Hugging Face weights and AnySplat assets
+volume = modal.Volume.from_name("anysplat-cache", create_if_missing=True)
 
 
 @app.function(
     image=image,
-    gpu="A100",  # A100 for better VRAM (DiffSplat needs ~16GB for SD1.5 model)
-    timeout=600,  # 10 minute timeout
+    gpu="A100",
+    timeout=900,  # 15 minutes is plenty for feed-forward AnySplat
     volumes={"/cache": volume},
 )
 def process_image(image_bytes: bytes, filename: str, prompt: str = "", elevation: int = 20) -> bytes:
     """
-    Process an image with DiffSplat and return the PLY file bytes.
-    
-    Args:
-        image_bytes: Input image as bytes
-        filename: Original filename
-        prompt: Optional text prompt (helps with quality)
-        elevation: Camera elevation angle (default 20 degrees)
+    Process a single image with AnySplat and return a PLY file with 3D Gaussians.
+
+    - Saves the uploaded image to a temporary folder.
+    - Runs AnySplat in feed-forward mode to predict 3D Gaussians + poses.
+    - Exports a Gaussian splat as a .ply using AnySplat's own export utility.
     """
     import os
     import sys
     import tempfile
     from pathlib import Path
-    
-    # Set cache directories
+
+    import torch
+
+    # Route heavy downloads through the shared volume
     os.environ["TORCH_HOME"] = "/cache/torch"
     os.environ["HF_HOME"] = "/cache/huggingface"
     os.environ["HF_DATASETS_CACHE"] = "/cache/huggingface/datasets"
-    
-    # Add DiffSplat to path
-    sys.path.insert(0, "/opt/diffsplat")
-    sys.path.insert(0, "/opt/diffsplat/src")
-    sys.path.insert(0, "/opt/diffsplat/extensions")
-    
+
+    # Add AnySplat to Python path
+    sys.path.insert(0, "/opt/anysplat")
+
+    from src.model.model.anysplat import AnySplat  # type: ignore
+    from src.utils.image import process_image as preprocess_image  # type: ignore
+    from src.model.ply_export import export_ply  # type: ignore
+
+    # Cache the model at module level to avoid re-loading on warm containers
+    global _ANYSPLAT_MODEL  # type: ignore
+    try:
+        model = _ANYSPLAT_MODEL  # type: ignore[name-defined]
+    except NameError:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = AnySplat.from_pretrained("lhjiang/anysplat")
+        model = model.to(device)
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad = False
+        _ANYSPLAT_MODEL = model  # type: ignore
+
+    device = next(model.parameters()).device  # type: ignore[attr-defined]
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Save input image
-        input_path = Path(tmpdir) / filename
+        tmpdir_path = Path(tmpdir)
+        # Save uploaded bytes
+        input_path = tmpdir_path / filename
         input_path.write_bytes(image_bytes)
-        
-        # Output directory
-        output_dir = Path(tmpdir) / "output"
-        output_dir.mkdir()
-        
-        print(f"🔄 Starting DiffSplat processing for {filename} ({len(image_bytes)} bytes)...")
-        print(f"📷 Using elevation: {elevation}°, prompt: '{prompt or 'empty'}'")
-        
-        # Download model weights if not cached
-        from huggingface_hub import hf_hub_download, snapshot_download
-        
-        print("📥 Ensuring models are downloaded...")
-        model_dir = Path("/cache/diffsplat_models")
-        model_dir.mkdir(exist_ok=True, parents=True)
-        
-        # Download the SD1.5 image-conditioned model (most efficient)
-        model_name = "gsdiff_gobj83k_sd15_image__render"
-        gsrecon_name = "gsrecon_gobj265k_cnp_even4"
-        gsvae_name = "gsvae_gobj265k_sd"
-        
-        try:
-            # Download all required models
-            for name in [model_name, gsrecon_name, gsvae_name]:
-                model_path = model_dir / name
-                if not model_path.exists():
-                    print(f"📥 Downloading {name}...")
-                    snapshot_download(
-                        repo_id="chenguolin/DiffSplat",
-                        allow_patterns=[f"{name}/*"],
-                        local_dir=str(model_dir),
-                        local_dir_use_symlinks=False,
-                    )
-        except Exception as e:
-            print(f"⚠️ Model download warning: {e}")
-        
-        # Run DiffSplat inference using their inference script
-        import subprocess
-        
-        # Build the inference command
-        # Using SD1.5 image-conditioned model for best efficiency
-        cmd = [
-            "bash", "/opt/diffsplat/scripts/infer.sh",
-            "src/infer_gsdiff_sd.py",
-            "configs/gsdiff_sd15.yaml",
-            model_name,
-            "--rembg_and_center",
-            "--triangle_cfg_scaling",
-            "--guidance_scale", "2",
-            "--image_path", str(input_path),
-            "--elevation", str(elevation),
-            "--save_ply",
-            "--opacity_threshold_ply", "0.1",
-            "--half_precision",  # Use BF16 for memory efficiency
-            "--output_dir", str(output_dir),
-            "--gpu_id", "0",
-            "--seed", "42",
-        ]
-        
-        # Add prompt if provided
-        if prompt:
-            # Replace spaces with underscores for DiffSplat
-            cmd.extend(["--prompt", prompt.replace(" ", "_")])
-        
-        env = os.environ.copy()
-        env["PYTHONPATH"] = "/opt/diffsplat:/opt/diffsplat/src:/opt/diffsplat/extensions"
-        
-        print(f"🚀 Running command: {' '.join(cmd)}")
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=540,  # 9 minutes
-            cwd="/opt/diffsplat",
-            env=env,
+
+        print(f"🔄 Starting AnySplat processing for {filename} ({len(image_bytes)} bytes)...")
+
+        # AnySplat expects a set of views; we feed a single-view sequence.
+        img_tensor = preprocess_image(str(input_path))
+        images = torch.stack([img_tensor], dim=0).unsqueeze(0).to(device)  # [1, K=1, 3, 448, 448]
+        b, v, _, h, w = images.shape
+        print(f"📐 AnySplat input tensor shape: {images.shape} (batch={b}, views={v}, H={h}, W={w})")
+
+        # Run inference
+        with torch.no_grad():
+            gaussians, pred_context_pose = model.inference((images + 1) * 0.5)  # type: ignore[attr-defined]
+
+        # Export to PLY using AnySplat's helper (mirrors inference.py)
+        ply_path = tmpdir_path / "gaussians.ply"
+        export_ply(
+            gaussians.means[0],
+            gaussians.scales[0],
+            gaussians.rotations[0],
+            gaussians.harmonics[0],
+            gaussians.opacities[0],
+            ply_path,
         )
-        
-        print("DiffSplat stdout:", result.stdout)
-        if result.stderr:
-            print("DiffSplat stderr:", result.stderr)
-        
-        if result.returncode != 0:
-            # Try alternative approach: direct Python inference
-            print("⚠️ Bash script failed, trying direct Python inference...")
-            
-            try:
-                # Import DiffSplat modules
-                from src.options import opt_dict
-                from omegaconf import OmegaConf
-                import torch
-                
-                # Load config
-                config_path = "/opt/diffsplat/configs/gsdiff_sd15.yaml"
-                cfg = OmegaConf.load(config_path)
-                opt = opt_dict["gsdiff_sd15"]
-                opt = OmegaConf.merge(opt, cfg)
-                
-                # Set image conditioning options
-                opt.view_concat_condition = True
-                opt.input_concat_binary_mask = True
-                opt.prediction_type = "v_prediction"
-                
-                # Load and run inference
-                # This is a simplified version - the actual DiffSplat has more complex setup
-                from PIL import Image
-                from rembg import remove
-                
-                # Load and preprocess image
-                img = Image.open(input_path).convert("RGBA")
-                
-                # Remove background
-                img_no_bg = remove(img)
-                
-                # Center the object
-                # ... (simplified - actual DiffSplat does more preprocessing)
-                
-                # Save preprocessed image
-                preprocessed_path = Path(tmpdir) / "preprocessed.png"
-                img_no_bg.save(preprocessed_path)
-                
-                print(f"✅ Preprocessed image saved to {preprocessed_path}")
-                
-                # For now, raise to fall back to error
-                raise Exception("Direct inference not fully implemented - use subprocess")
-                
-            except Exception as e2:
-                print(f"❌ Direct inference also failed: {e2}")
-                raise Exception(f"DiffSplat failed: {result.stderr or result.stdout}")
-        
-        # Find the output PLY file
-        ply_files = list(output_dir.rglob("*.ply"))
-        if not ply_files:
-            # Check alternative output locations
-            alt_output = Path("/opt/diffsplat/out") / model_name / "inference"
-            ply_files = list(alt_output.rglob("*.ply")) if alt_output.exists() else []
-        
-        if not ply_files:
-            raise Exception("No PLY file generated")
-        
-        # Return the PLY file bytes
-        ply_path = ply_files[0]
-        print(f"✅ Found PLY file: {ply_path} ({ply_path.stat().st_size} bytes)")
+
+        if not ply_path.exists():
+            raise RuntimeError(f"AnySplat did not produce a PLY file at {ply_path}")
+
+        print(f"✅ AnySplat generated PLY: {ply_path} ({ply_path.stat().st_size} bytes)")
         return ply_path.read_bytes()
 
 
 @app.function(image=image)
 @modal.fastapi_endpoint(method="GET")
 async def health_check():
-    """Health check endpoint to verify Modal is responding."""
-    return {"status": "ok", "service": "diffsplat", "endpoint": "healthy"}
+    return {"status": "ok", "service": "anysplat", "endpoint": "healthy"}
 
 
-@app.function(image=image, gpu="A100", timeout=600, volumes={"/cache": volume})
+@app.function(image=image, gpu="A100", timeout=900, volumes={"/cache": volume})
 @modal.fastapi_endpoint(method="POST")
 async def process_image_endpoint(request: dict) -> dict:
-    """
-    HTTP endpoint for processing images.
-    Expects: { 
-        "image": base64_encoded_image, 
-        "filename": "image.jpg",
-        "prompt": "optional description",
-        "elevation": 20,
-        "async": false 
-    }
-    Returns: { "ply": base64_encoded_ply } or { "call_id": "..." } for async
-    """
+    """HTTP endpoint for processing images via AnySplat."""
     import base64
 
     try:
-        print(f"🔄 Received request: async={request.get('async', False)}, filename={request.get('filename', 'N/A')}")
-        
+        print(
+            f"🔄 Received AnySplat request: async={request.get('async', False)}, "
+            f"filename={request.get('filename', 'N/A')}"
+        )
+
         image_b64 = request.get("image")
         filename = request.get("filename", "image.jpg")
         prompt = request.get("prompt", "")
-        elevation = request.get("elevation", 20)
+        elevation = request.get("elevation", 20)  # kept for API compatibility, unused
         is_async = request.get("async", False)
 
         if not image_b64:
-            print("❌ No image provided in request")
             return {"error": "No image provided"}
 
-        print(f"📦 Decoding image (base64 length: {len(image_b64)})...")
         image_bytes = base64.b64decode(image_b64)
-        print(f"✅ Image decoded successfully ({len(image_bytes)} bytes)")
 
         if is_async:
-            # Spawn async job and return call_id
-            print(f"🚀 Spawning async job for {filename}...")
             call = process_image.spawn(image_bytes, filename, prompt, elevation)
-            print(f"✅ Async job spawned with call_id: {call.object_id}")
             return {"success": True, "call_id": call.object_id, "status": "processing"}
         else:
-            # Process synchronously
-            print(f"🔄 Processing synchronously for {filename}...")
             ply_bytes = process_image.remote(image_bytes, filename, prompt, elevation)
-            print(f"✅ Processing completed, encoding result ({len(ply_bytes)} bytes)...")
             ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
-            print("✅ Result encoded successfully")
             return {"success": True, "ply": ply_b64}
 
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Error in process_image_endpoint: {error_msg}")
         import traceback
+
         traceback.print_exc()
-        return {"error": error_msg}
+        return {"error": str(e)}
 
 
 @app.function(image=image)
 @modal.fastapi_endpoint()
 async def get_job_status_endpoint(call_id: str):
-    """
-    Get status of async job.
-    Expects: call_id as query parameter (?call_id=...)
-    Returns: { "status": "processing|completed|failed", "ply": base64_encoded_ply (if completed), "error": str (if failed) }
-    """
+    """Get status of async AnySplat job."""
     import base64
     from modal.functions import FunctionCall
 
     try:
         if not call_id:
-            print("❌ No call_id provided to status endpoint")
             return {"error": "call_id query parameter required"}
-        
-        print(f"🔍 Checking status for call_id: {call_id}")
-        
-        try:
-            # New Modal API: from_id only takes call_id
-            call = FunctionCall.from_id(call_id)
-        except Exception as e:
-            print(f"❌ Failed to get FunctionCall from call_id {call_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            return {"error": f"Invalid call_id: {call_id}. Error: {str(e)}"}
-        
-        print(f"📊 Checking call status with get(timeout=0)...")
+
+        call = FunctionCall.from_id(call_id)
+
         try:
             ply_bytes = call.get(timeout=0)
-            print(f"✅ Job completed! Result retrieved ({len(ply_bytes)} bytes), encoding...")
             ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
-            print(f"✅ Result encoded successfully")
             return {"status": "completed", "ply": ply_b64}
         except TimeoutError:
-            print(f"⏳ Job still processing (get() timeout)")
             return {"status": "processing"}
         except Exception as e:
-            error_msg = str(e)
-            print(f"❌ Job failed or error occurred: {error_msg}")
-            import traceback
-            traceback.print_exc()
-            return {"status": "failed", "error": error_msg}
+            return {"status": "failed", "error": str(e)}
 
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Exception in get_job_status_endpoint: {error_msg}")
         import traceback
+
         traceback.print_exc()
-        return {"error": error_msg}
+        return {"error": str(e)}
 
 
 @app.local_entrypoint()
 def main():
-    """Test the function locally."""
+    """
+    Local CLI helper:
+
+        modal run modal_app.py -- <image_path>
+    """
     import sys
+    from pathlib import Path
 
     if len(sys.argv) < 2:
-        print("Usage: modal run modal_app.py -- <image_path> [prompt] [elevation]")
+        print("Usage: modal run modal_app.py -- <image_path>")
         return
 
-    image_path = sys.argv[1]
-    prompt = sys.argv[2] if len(sys.argv) > 2 else ""
-    elevation = int(sys.argv[3]) if len(sys.argv) > 3 else 20
-    
-    with open(image_path, "rb") as f:
+    image_path = Path(sys.argv[1])
+    if not image_path.exists():
+        print(f"Image not found: {image_path}")
+        return
+
+    with image_path.open("rb") as f:
         image_bytes = f.read()
 
-    print(f"Processing {image_path} with prompt='{prompt}', elevation={elevation}...")
-    ply_bytes = process_image.remote(image_bytes, "test.jpg", prompt, elevation)
+    print(f"Processing {image_path} with AnySplat...")
+    ply_bytes = process_image.remote(image_bytes, image_path.name)
 
-    output_path = image_path.rsplit(".", 1)[0] + ".ply"
-    with open(output_path, "wb") as f:
+    output_path = image_path.with_suffix(".ply")
+    with output_path.open("wb") as f:
         f.write(ply_bytes)
 
-    print(f"Saved to {output_path}")
+    print(f"Saved AnySplat PLY to {output_path}")
