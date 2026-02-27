@@ -19,9 +19,10 @@ image = (
         "build-essential", "ninja-build"
     )
     .pip_install(
+        # PyTorch 2.4+ required by DiffSplat
+        "torch==2.4.0",
+        "torchvision==0.19.0",
         # Core dependencies
-        "torch==2.1.2",
-        "torchvision==0.16.2",
         "numpy",
         "scipy",
         "pillow",
@@ -35,8 +36,8 @@ image = (
         "imageio-ffmpeg",
         "huggingface_hub",
         "fastapi",
-        # DiffSplat specific dependencies
-        "transformers>=4.36.0",
+        # DiffSplat specific dependencies  
+        "transformers>=4.40.0,<5.0.0",  # Pin to avoid breaking changes
         "diffusers>=0.32.0",
         "accelerate",
         "safetensors",
@@ -48,13 +49,12 @@ image = (
         "pygltflib",
         "trimesh",
         "open3d",
-        "xformers",  # Memory efficient attention
         "opencv-python",
     )
     .run_commands(
         # Clone DiffSplat repository
         "git clone https://github.com/chenguolin/DiffSplat.git /opt/diffsplat",
-        # Install DiffSplat's setup script dependencies (no setup.py in repo)
+        # Run DiffSplat setup
         "cd /opt/diffsplat && bash settings/setup.sh || true",
     )
     .env({"PYTHONPATH": "/opt/diffsplat:/opt/diffsplat/src:/opt/diffsplat/extensions"})
