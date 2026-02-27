@@ -317,7 +317,6 @@ async def get_job_status_endpoint(call_id: str):
     """
     import base64
     from modal.functions import FunctionCall
-    from modal.exception import NotFoundError
 
     try:
         if not call_id:
@@ -327,10 +326,8 @@ async def get_job_status_endpoint(call_id: str):
         print(f"🔍 Checking status for call_id: {call_id}")
         
         try:
-            call = FunctionCall.from_id(call_id, process_image)
-        except NotFoundError as e:
-            print(f"❌ FunctionCall not found for call_id {call_id}: {e}")
-            return {"error": f"Job not found: {call_id}"}
+            # New Modal API: from_id only takes call_id
+            call = FunctionCall.from_id(call_id)
         except Exception as e:
             print(f"❌ Failed to get FunctionCall from call_id {call_id}: {e}")
             import traceback
