@@ -133,21 +133,42 @@ def process_image(image_bytes: bytes, filename: str, prompt: str = "", elevation
         return ply_path.read_bytes()
 
 
-@app.function(image=image)
-@modal.fastapi_endpoint(method="GET")
-async def health_check():
-    return {"status": "ok", "service": "anysplat", "endpoint": "healthy"}
-
-
 @app.function(image=image, gpu="A100", timeout=900, volumes={"/cache": volume})
 @modal.fastapi_endpoint(method="POST")
-async def process_image_endpoint(request: dict) -> dict:
-    """HTTP endpoint for processing images via AnySplat."""
+async def anysplat_router(request: dict) -> dict:
+    """
+    Single web endpoint that multiplexes:
+    - op = \"process\" (default): start AnySplat job (sync or async)
+    - op = \"status\": get status for an async job
+    - op = \"health\": simple health check
+    """
     import base64
+    from modal.functions import FunctionCall
 
     try:
+        op = request.get("op") or "process"
+
+        if op == "health":
+            return {"status": "ok", "service": "anysplat", "endpoint": "router"}
+
+        if op == "status":
+            call_id = request.get("call_id")
+            if not call_id:
+                return {"error": "call_id required"}
+
+            call = FunctionCall.from_id(call_id)
+            try:
+                ply_bytes = call.get(timeout=0)
+                ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
+                return {"status": "completed", "ply": ply_b64}
+            except TimeoutError:
+                return {"status": "processing"}
+            except Exception as e:
+                return {"status": "failed", "error": str(e)}
+
+        # Default: process a new image
         print(
-            f"🔄 Received AnySplat request: async={request.get('async', False)}, "
+            f"🔄 Received AnySplat process request: async={request.get('async', False)}, "
             f"filename={request.get('filename', 'N/A')}"
         )
 
@@ -165,39 +186,10 @@ async def process_image_endpoint(request: dict) -> dict:
         if is_async:
             call = process_image.spawn(image_bytes, filename, prompt, elevation)
             return {"success": True, "call_id": call.object_id, "status": "processing"}
-        else:
-            ply_bytes = process_image.remote(image_bytes, filename, prompt, elevation)
-            ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
-            return {"success": True, "ply": ply_b64}
 
-    except Exception as e:
-        import traceback
-
-        traceback.print_exc()
-        return {"error": str(e)}
-
-
-@app.function(image=image)
-@modal.fastapi_endpoint()
-async def get_job_status_endpoint(call_id: str):
-    """Get status of async AnySplat job."""
-    import base64
-    from modal.functions import FunctionCall
-
-    try:
-        if not call_id:
-            return {"error": "call_id query parameter required"}
-
-        call = FunctionCall.from_id(call_id)
-
-        try:
-            ply_bytes = call.get(timeout=0)
-            ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
-            return {"status": "completed", "ply": ply_b64}
-        except TimeoutError:
-            return {"status": "processing"}
-        except Exception as e:
-            return {"status": "failed", "error": str(e)}
+        ply_bytes = process_image.remote(image_bytes, filename, prompt, elevation)
+        ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
+        return {"success": True, "ply": ply_b64}
 
     except Exception as e:
         import traceback

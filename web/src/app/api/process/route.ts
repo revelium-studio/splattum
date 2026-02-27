@@ -25,13 +25,10 @@ function corsResponse(response: NextResponse): NextResponse {
 const IS_VERCEL = process.env.VERCEL === "1";
 
 // Modal configuration for GPU processing (replacing RunPod)
-// Deploy modal_app.py and get the endpoint URLs for AnySplat
+// Single AnySplat router endpoint (handles process + status)
 const MODAL_ENDPOINT =
   process.env.MODAL_ENDPOINT ||
-  "https://revelium-studio--anysplat-process-image-endpoint.modal.run";
-const MODAL_STATUS_ENDPOINT =
-  process.env.MODAL_STATUS_ENDPOINT ||
-  "https://revelium-studio--anysplat-get-job-status-endpoint.modal.run";
+  "https://revelium-studio--anysplat-router.modal.run";
 
 // Paths for local development
 const PROJECT_ROOT = path.resolve(process.cwd(), "..");
@@ -71,7 +68,7 @@ async function processWithModal(
   prompt: string = "",
   elevation: number = 20
 ): Promise<{ callId: string } | { plyBase64: string }> {
-  console.log(`🚀 Sending image to Modal AnySplat endpoint...`);
+  console.log(`🚀 Sending image to Modal AnySplat router endpoint...`);
   console.log(`📍 Modal endpoint: ${MODAL_ENDPOINT}`);
 
   const response = await fetch(MODAL_ENDPOINT, {
@@ -80,6 +77,7 @@ async function processWithModal(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
+      op: "process",
       image: imageBase64,
       filename: filename,
       prompt: prompt,
@@ -326,76 +324,86 @@ export async function GET(request: NextRequest) {
     return corsResponse(NextResponse.json({ error: "No jobId provided" }, { status: 400 }));
   }
 
-  // Check if this looks like a Modal call_id (starts with "fc-")
-  const isModalJob = jobId.startsWith("fc-");
-  
-  if (IS_VERCEL || isModalJob) {
-    // Poll Modal for job status
+  // For Modal AnySplat router, we always POST to the same endpoint for status
+  if (IS_VERCEL || jobId.startsWith("fc-")) {
     try {
-      console.log(`🔍 Polling Modal status for call_id: ${jobId}`);
-      
-      const statusUrl = `${MODAL_STATUS_ENDPOINT}?call_id=${encodeURIComponent(jobId)}`;
-      console.log(`🌐 Checking status at: ${statusUrl}`);
-      
-      const response = await fetch(statusUrl, {
-        method: "GET",
+      console.log(`🔍 Polling Modal AnySplat router status for call_id: ${jobId}`);
+
+      const response = await fetch(MODAL_ENDPOINT, {
+        method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
+        body: JSON.stringify({
+          op: "status",
+          call_id: jobId,
+        }),
         signal: AbortSignal.timeout(30000), // 30 second timeout
       });
-      
-      console.log(`📍 Modal status response: ${response.status}`);
+
+      console.log(`📍 Modal AnySplat router status response: ${response.status}`);
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`❌ Modal status check failed: ${response.status} - ${errorText}`);
-        
+        console.error(
+          `❌ Modal AnySplat status check failed: ${response.status} - ${errorText}`
+        );
+
         // Return processing status as fallback
-        return corsResponse(NextResponse.json({ 
-          status: "processing",
-          fileName: "",
-          startTime: Date.now(),
-        }));
+        return corsResponse(
+          NextResponse.json({
+            status: "processing",
+            fileName: "",
+            startTime: Date.now(),
+          })
+        );
       }
 
       const modalStatus = await response.json();
-      console.log(`📊 Modal status response:`, JSON.stringify(modalStatus, null, 2));
+      console.log(`📊 Modal AnySplat status response:`, JSON.stringify(modalStatus, null, 2));
 
       if (modalStatus.status === "completed") {
-        console.log(`✅ Modal job completed`);
-        return corsResponse(NextResponse.json({
-          status: "completed",
-          plyBase64: modalStatus.ply,
-          fileName: "",
-          startTime: Date.now(),
-        }));
+        console.log(`✅ Modal AnySplat job completed`);
+        return corsResponse(
+          NextResponse.json({
+            status: "completed",
+            plyBase64: modalStatus.ply,
+            fileName: "",
+            startTime: Date.now(),
+          })
+        );
       } else if (modalStatus.status === "failed") {
-        console.error(`❌ Modal job failed:`, modalStatus.error);
-        return corsResponse(NextResponse.json({
-          status: "failed",
-          error: modalStatus.error || "Processing failed",
-          fileName: "",
-          startTime: Date.now(),
-        }));
+        console.error(`❌ Modal AnySplat job failed:`, modalStatus.error);
+        return corsResponse(
+          NextResponse.json({
+            status: "failed",
+            error: modalStatus.error || "Processing failed",
+            fileName: "",
+            startTime: Date.now(),
+          })
+        );
       } else {
         // Still processing
-        console.log(`⏳ Modal job still processing`);
-        return corsResponse(NextResponse.json({
-          status: "processing",
-          modalStatus: modalStatus.status,
-          fileName: "",
-          startTime: Date.now(),
-        }));
+        console.log(`⏳ Modal AnySplat job still processing`);
+        return corsResponse(
+          NextResponse.json({
+            status: "processing",
+            modalStatus: modalStatus.status,
+            fileName: "",
+            startTime: Date.now(),
+          })
+        );
       }
     } catch (error) {
-      console.error("❌ Error polling Modal status:", error);
+      console.error("❌ Error polling Modal AnySplat router status:", error);
       // If Modal API fails, assume still processing
-      return corsResponse(NextResponse.json({
-        status: "processing",
-        fileName: "",
-        startTime: Date.now(),
-      }));
+      return corsResponse(
+        NextResponse.json({
+          status: "processing",
+          fileName: "",
+          startTime: Date.now(),
+        })
+      );
     }
   } else {
     // Local processing - use file-based status
