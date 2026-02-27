@@ -54,9 +54,10 @@ image = (
     .run_commands(
         # Clone DiffSplat repository
         "git clone https://github.com/chenguolin/DiffSplat.git /opt/diffsplat",
-        # Install DiffSplat package
-        "cd /opt/diffsplat && pip install -e .",
+        # Install DiffSplat's setup script dependencies (no setup.py in repo)
+        "cd /opt/diffsplat && bash settings/setup.sh || true",
     )
+    .env({"PYTHONPATH": "/opt/diffsplat:/opt/diffsplat/src:/opt/diffsplat/extensions"})
 )
 
 # Create a volume for caching the models
