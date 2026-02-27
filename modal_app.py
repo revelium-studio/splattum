@@ -28,8 +28,12 @@ image = (
         # AFTER setup.sh, upgrade PyTorch to 2.4+ (required by DiffSplat)
         "torch==2.4.0",
         "torchvision==0.19.0",
+        # xformers compatible with PyTorch 2.4
+        "xformers==0.0.27.post2",
         # Pin transformers to avoid the nn import bug
         "transformers==4.44.0",
+        # Missing dependencies
+        "wandb",
         # Ensure other critical deps are correct versions
         "diffusers>=0.32.0",
         "accelerate",
