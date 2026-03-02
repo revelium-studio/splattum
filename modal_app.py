@@ -42,6 +42,17 @@ image = (
         "--index-url https://download.pytorch.org/whl/cu121",
         # Install AnySplat requirements (includes a prebuilt gsplat wheel for pt2.2/cu121)
         "pip install --no-cache-dir -r /opt/anysplat/requirements.txt",
+        # NUCLEAR FIX for OpenCV: The NVIDIA base image ships a broken system-level
+        # OpenCV whose cv2.dnn module is incompatible with pip-installed versions.
+        # We must physically delete every trace of cv2/opencv before installing a
+        # clean headless build.
+        "pip uninstall -y opencv-python opencv-python-headless "
+        "opencv-contrib-python opencv-contrib-python-headless 2>/dev/null || true",
+        "find /usr -name 'cv2*' -exec rm -rf {} + 2>/dev/null || true",
+        "find /usr -name 'opencv*' -path '*/dist-packages/*' -exec rm -rf {} + 2>/dev/null || true",
+        "pip install --no-cache-dir opencv-python-headless==4.8.0.74",
+        # Pin numpy < 2 to avoid ABI mismatch with PyTorch 2.2 compiled against numpy 1.x
+        "pip install --no-cache-dir 'numpy<2'",
     )
 )
 
