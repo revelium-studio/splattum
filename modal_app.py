@@ -48,10 +48,12 @@ image = (
         #    gsplat etc. will now be compiled / resolved against torch 2.2.0+cu121.
         "pip install --no-cache-dir -r /opt/anysplat/requirements.txt",
 
-        # ── Phase 3 (removed): Do NOT force-reinstall torch after requirements.txt.
-        #    requirements.txt does not overwrite torch, and force-reinstalling would
-        #    replace the NVIDIA CUDA shared libraries that gsplat was linked against,
-        #    causing "Not compiled with CUDA support" at runtime.
+        # ── Phase 3: CRITICAL FIX for torch_scatter — the version built from source
+        #    by requirements.txt compiles WITHOUT CUDA support (known AnySplat issue #40).
+        #    We must reinstall it from PyG's prebuilt CUDA wheels.
+        #    See: https://github.com/InternRobotics/AnySplat/issues/40
+        "pip install --no-cache-dir --force-reinstall torch-scatter "
+        "-f https://data.pyg.org/whl/torch-2.2.0+cu121.html",
 
         # ── Phase 4: NUCLEAR FIX for OpenCV (NVIDIA base image conflict)
         "pip uninstall -y opencv-python opencv-python-headless "
@@ -63,11 +65,18 @@ image = (
         # ── Phase 5: Pin numpy < 2 (must be LAST to override any 2.x)
         "pip install --no-cache-dir 'numpy<2'",
 
-        # ── Phase 6: Verify torch sees CUDA and gsplat imports cleanly
-        'python -c "import torch; '
+        # ── Phase 6: Verify torch CUDA, gsplat, and torch_scatter all work
+        'python -c "'
+        "import torch; "
         "print(f'torch={torch.__version__}  cuda={torch.version.cuda}  cudnn={torch.backends.cudnn.is_available()}'); "
         "assert torch.version.cuda is not None, 'torch has NO CUDA support!'; "
-        "import gsplat; print(f'gsplat={gsplat.__version__}')\"",
+        "import gsplat; print(f'gsplat={gsplat.__version__}'); "
+        "import torch_scatter; print(f'torch_scatter OK'); "
+        # Quick smoke-test: scatter_add on a CUDA-like tensor (CPU is fine at build time)
+        "src = torch.ones(4); idx = torch.tensor([0,0,1,1]); "
+        "from torch_scatter import scatter_add; "
+        "out = scatter_add(src, idx, dim=0); "
+        "print(f'scatter_add smoke test passed: {out}')\"",
     )
 )
 
