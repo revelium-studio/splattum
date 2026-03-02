@@ -28,7 +28,7 @@ const IS_VERCEL = process.env.VERCEL === "1";
 // Single AnySplat router endpoint (handles process + status)
 const MODAL_ENDPOINT =
   process.env.MODAL_ENDPOINT ||
-  "https://revelium-studio--anysplat-router.modal.run";
+  "https://revelium-studio--anysplat-anysplat-router.modal.run";
 
 // Paths for local development
 const PROJECT_ROOT = path.resolve(process.cwd(), "..");
