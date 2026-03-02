@@ -33,7 +33,9 @@ function getApiUrl(path: string): string {
 export default function Home() {
   const [state, setState] = useState<AppState>("upload");
   const [uploadedImage, setUploadedImage] = useState<File | null>(null);
+  const [uploadedImages, setUploadedImages] = useState<File[]>([]);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [imagePreviews, setImagePreviews] = useState<string[]>([]);
   const [result, setResult] = useState<ProcessedResult | null>(null);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -52,12 +54,37 @@ export default function Home() {
 
   const handleImageUpload = useCallback((file: File) => {
     setUploadedImage(file);
+    setUploadedImages([file]);
     setError(null);
     const reader = new FileReader();
     reader.onload = (e) => {
-      setImagePreview(e.target?.result as string);
+      const url = e.target?.result as string;
+      setImagePreview(url);
+      setImagePreviews([url]);
     };
     reader.readAsDataURL(file);
+  }, []);
+
+  const handleMultiImageUpload = useCallback((files: File[]) => {
+    setUploadedImage(files[0]);
+    setUploadedImages(files);
+    setError(null);
+
+    // Build previews for all files
+    const previews: string[] = [];
+    let loaded = 0;
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        previews.push(e.target?.result as string);
+        loaded++;
+        if (loaded === files.length) {
+          setImagePreviews([...previews]);
+          setImagePreview(previews[0]);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
   }, []);
 
   // For local development - poll for job status
@@ -246,9 +273,14 @@ export default function Home() {
     setError(null);
 
     const formData = new FormData();
-    formData.append("image", uploadedImage);
+    // Send all images if multi-image, otherwise single
+    if (uploadedImages.length > 1) {
+      uploadedImages.forEach((file) => formData.append("images", file));
+    } else {
+      formData.append("image", uploadedImage);
+    }
 
-    console.log("🚀 Starting image processing with LiftImage3D...");
+    console.log(`🚀 Starting AnySplat processing with ${uploadedImages.length} image(s)...`);
 
     try {
       console.log("Submitting image for processing...");
@@ -421,7 +453,7 @@ export default function Home() {
       setState("upload");
       setProgress(0);
     }
-  }, [uploadedImage, imagePreview, pollJobStatus]);
+  }, [uploadedImage, uploadedImages, imagePreview, pollJobStatus]);
 
   const handleReset = useCallback(() => {
     if (pollingRef.current) clearInterval(pollingRef.current);
@@ -430,7 +462,9 @@ export default function Home() {
 
     setState("upload");
     setUploadedImage(null);
+    setUploadedImages([]);
     setImagePreview(null);
+    setImagePreviews([]);
     setResult(null);
     setProgress(0);
     setError(null);
@@ -450,12 +484,17 @@ export default function Home() {
           >
             <UploadStep
               onImageUpload={handleImageUpload}
+              onMultiImageUpload={handleMultiImageUpload}
               uploadedImage={uploadedImage}
+              uploadedImages={uploadedImages}
               imagePreview={imagePreview}
+              imagePreviews={imagePreviews}
               onProcess={handleProcess}
               onClear={() => {
                 setUploadedImage(null);
+                setUploadedImages([]);
                 setImagePreview(null);
+                setImagePreviews([]);
                 setError(null);
               }}
               error={error}

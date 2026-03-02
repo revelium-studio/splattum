@@ -6,8 +6,11 @@ import { Upload, Image as ImageIcon, X, ArrowRight, AlertCircle } from "lucide-r
 
 interface UploadStepProps {
   onImageUpload: (file: File) => void;
+  onMultiImageUpload?: (files: File[]) => void;
   uploadedImage: File | null;
+  uploadedImages?: File[];
   imagePreview: string | null;
+  imagePreviews?: string[];
   onProcess: () => void;
   onClear: () => void;
   error?: string | null;
@@ -15,8 +18,11 @@ interface UploadStepProps {
 
 export default function UploadStep({
   onImageUpload,
+  onMultiImageUpload,
   uploadedImage,
+  uploadedImages = [],
   imagePreview,
+  imagePreviews = [],
   onProcess,
   onClear,
   error,
@@ -39,34 +45,52 @@ export default function UploadStep({
       e.preventDefault();
       setIsDragging(false);
 
-      const file = e.dataTransfer.files[0];
-      if (file && file.type.startsWith("image/")) {
-        // Check file size (4MB limit to avoid Vercel 413 errors)
-        const maxSize = 4 * 1024 * 1024; // 4MB
-        if (file.size > maxSize) {
-          alert(`Image is too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum size is 4MB. Please compress or resize your image.`);
-          return;
+      const maxSize = 4 * 1024 * 1024; // 4MB per file
+      const imageFiles: File[] = [];
+      
+      for (let i = 0; i < e.dataTransfer.files.length; i++) {
+        const file = e.dataTransfer.files[i];
+        if (file.type.startsWith("image/")) {
+          if (file.size > maxSize) {
+            alert(`"${file.name}" is too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum 4MB per image.`);
+            continue;
+          }
+          imageFiles.push(file);
         }
-        onImageUpload(file);
+      }
+
+      if (imageFiles.length > 1 && onMultiImageUpload) {
+        onMultiImageUpload(imageFiles.slice(0, 10)); // Max 10 images
+      } else if (imageFiles.length === 1) {
+        onImageUpload(imageFiles[0]);
       }
     },
-    [onImageUpload]
+    [onImageUpload, onMultiImageUpload]
   );
 
   const handleFileSelect = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file) {
-        // Check file size (4MB limit to avoid Vercel 413 errors)
-        const maxSize = 4 * 1024 * 1024; // 4MB
-        if (file.size > maxSize) {
-          alert(`Image is too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum size is 4MB. Please compress or resize your image.`);
-          return;
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+
+      const maxSize = 4 * 1024 * 1024;
+      const validFiles: File[] = [];
+
+      for (let i = 0; i < files.length; i++) {
+        if (files[i].size > maxSize) {
+          alert(`"${files[i].name}" is too large (${(files[i].size / 1024 / 1024).toFixed(1)}MB). Maximum 4MB per image.`);
+          continue;
         }
-        onImageUpload(file);
+        validFiles.push(files[i]);
+      }
+
+      if (validFiles.length > 1 && onMultiImageUpload) {
+        onMultiImageUpload(validFiles.slice(0, 10));
+      } else if (validFiles.length === 1) {
+        onImageUpload(validFiles[0]);
       }
     },
-    [onImageUpload]
+    [onImageUpload, onMultiImageUpload]
   );
 
   return (
@@ -116,6 +140,7 @@ export default function UploadStep({
                 ref={fileInputRef}
                 className="hidden"
                 accept="image/*"
+                multiple
                 onChange={handleFileSelect}
               />
               
@@ -132,35 +157,40 @@ export default function UploadStep({
                 </motion.div>
                 
                 <h3 className="text-lg sm:text-xl font-semibold text-foreground mb-2">
-                  Upload an image
+                  Upload images
                 </h3>
                 <p className="text-muted text-sm sm:text-base text-center max-w-md">
-                  Drag and drop or click to select. Supports PNG, JPG, WebP, and HEIC formats.
+                  Drag and drop or click to select. Supports PNG, JPG, WebP, and HEIC.
                 </p>
-                <p className="text-muted/60 text-xs mt-2">
-                  Maximum file size: 4MB
+                <p className="text-primary/80 text-xs mt-2 font-medium">
+                  💡 Upload multiple images of the same scene for much better 3D quality
+                </p>
+                <p className="text-muted/60 text-xs mt-1">
+                  Max 4 MB per image · up to 10 images
                 </p>
               </div>
             </div>
           ) : (
-            /* Image Preview */
+            /* Image Preview — single or multi */
             <div className="bg-card border border-border rounded-2xl p-6 sm:p-8">
               <div className="flex flex-col sm:flex-row items-center gap-6">
-                {/* Preview Image */}
-                <div className="relative w-32 h-32 sm:w-40 sm:h-40 rounded-xl overflow-hidden bg-background flex-shrink-0">
-                  {imagePreview && (
-                    <img
-                      src={imagePreview}
-                      alt="Preview"
-                      className="w-full h-full object-cover"
-                    />
-                  )}
+                {/* Preview thumbnails */}
+                <div className="flex flex-wrap gap-2 flex-shrink-0">
+                  {(imagePreviews.length > 0 ? imagePreviews : (imagePreview ? [imagePreview] : [])).map((src, i) => (
+                    <div
+                      key={i}
+                      className="relative w-24 h-24 sm:w-32 sm:h-32 rounded-xl overflow-hidden bg-background"
+                    >
+                      <img src={src} alt={`Preview ${i + 1}`} className="w-full h-full object-cover" />
+                    </div>
+                  ))}
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
                       onClear();
                     }}
-                    className="absolute top-2 right-2 w-7 h-7 rounded-full bg-background/80 backdrop-blur-sm flex items-center justify-center hover:bg-background transition-colors"
+                    className="absolute top-2 right-2 w-7 h-7 rounded-full bg-background/80 backdrop-blur-sm flex items-center justify-center hover:bg-background transition-colors z-10"
+                    style={{ position: "relative", top: 0, right: 0 }}
                   >
                     <X className="w-4 h-4 text-foreground" />
                   </button>
@@ -171,12 +201,26 @@ export default function UploadStep({
                   <div className="flex items-center justify-center sm:justify-start gap-2 mb-2">
                     <ImageIcon className="w-5 h-5 text-primary" />
                     <span className="text-foreground font-medium truncate max-w-[200px]">
-                      {uploadedImage.name}
+                      {uploadedImages.length > 1
+                        ? `${uploadedImages.length} images selected`
+                        : uploadedImage?.name || "image"}
                     </span>
                   </div>
-                  <p className="text-muted text-sm mb-4">
-                    {(uploadedImage.size / 1024).toFixed(1)} KB
+                  <p className="text-muted text-sm mb-1">
+                    {uploadedImages.length > 1
+                      ? `${(uploadedImages.reduce((s, f) => s + f.size, 0) / 1024).toFixed(0)} KB total`
+                      : uploadedImage ? `${(uploadedImage.size / 1024).toFixed(1)} KB` : ""}
                   </p>
+                  {uploadedImages.length > 1 && (
+                    <p className="text-primary/70 text-xs mb-3 font-medium">
+                      ✨ Multiple views → higher quality 3D
+                    </p>
+                  )}
+                  {(uploadedImages.length <= 1 && uploadedImage) && (
+                    <p className="text-muted/60 text-xs mb-3">
+                      Single image mode — 6 synthetic views will be generated
+                    </p>
+                  )}
                   
                   <button
                     onClick={onProcess}

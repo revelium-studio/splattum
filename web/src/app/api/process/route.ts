@@ -61,30 +61,42 @@ async function getJobStatus(jobId: string): Promise<JobStatus | null> {
   return JSON.parse(data);
 }
 
-// Process with Modal (GPU cloud)
+// Process with Modal (GPU cloud) — supports single or multiple images
 async function processWithModal(
-  imageBase64: string,
-  filename: string,
+  images: Array<{ base64: string; filename: string }>,
   prompt: string = "",
   elevation: number = 20
 ): Promise<{ callId: string } | { plyBase64: string }> {
-  console.log(`🚀 Sending image to Modal AnySplat router endpoint...`);
+  console.log(`🚀 Sending ${images.length} image(s) to Modal AnySplat router endpoint...`);
   console.log(`📍 Modal endpoint: ${MODAL_ENDPOINT}`);
+
+  // Build the request body.  If only one image, use backward-compatible
+  // single-image fields.  If multiple, use the "images" array.
+  let body: Record<string, unknown>;
+  if (images.length === 1) {
+    body = {
+      op: "process",
+      image: images[0].base64,
+      filename: images[0].filename,
+      prompt,
+      elevation,
+      async: true,
+    };
+  } else {
+    body = {
+      op: "process",
+      images: images.map((i) => ({ image: i.base64, filename: i.filename })),
+      prompt,
+      elevation,
+      async: true,
+    };
+  }
 
   const response = await fetch(MODAL_ENDPOINT, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      op: "process",
-      image: imageBase64,
-      filename: filename,
-      prompt: prompt,
-      elevation: elevation,
-      async: true, // Use async mode to avoid timeout
-    }),
-    signal: AbortSignal.timeout(60000), // 60 second timeout for job creation
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000),
   });
 
   if (!response.ok) {
@@ -99,13 +111,11 @@ async function processWithModal(
     throw new Error(result.error);
   }
   
-  // Check if async job was created
   if (result.call_id) {
     console.log(`✅ Modal async job created with call_id: ${result.call_id}`);
     return { callId: result.call_id };
   }
   
-  // Synchronous result
   if (result.ply) {
     console.log(`✅ Modal returned synchronous result`);
     return { plyBase64: result.ply };
@@ -199,119 +209,66 @@ export async function OPTIONS(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
-    const file = formData.get("image") as File;
     const prompt = (formData.get("prompt") as string) || "";
     const elevation = parseInt((formData.get("elevation") as string) || "20", 10);
 
-    if (!file) {
+    // Support both single file ("image") and multiple files ("images")
+    const singleFile = formData.get("image") as File | null;
+    const multiFiles = formData.getAll("images") as File[];
+
+    const files: File[] = [];
+    if (multiFiles.length > 0) {
+      files.push(...multiFiles);
+    } else if (singleFile) {
+      files.push(singleFile);
+    }
+
+    if (files.length === 0) {
       return corsResponse(NextResponse.json({ error: "No image provided" }, { status: 400 }));
     }
 
-    const jobId = Date.now().toString();
-    const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
+    console.log(`🚀 Starting Modal AnySplat processing with ${files.length} image(s)...`);
 
-    if (IS_VERCEL) {
-      // Use Modal AnySplat for GPU processing
-      console.log("🚀 Starting Modal AnySplat processing (Vercel)...");
+    // Convert all files to base64
+    const images: Array<{ base64: string; filename: string }> = [];
+    for (const file of files) {
+      const bytes = await file.arrayBuffer();
+      const buffer = Buffer.from(bytes);
+      images.push({ base64: buffer.toString("base64"), filename: file.name });
+    }
 
-      const imageBase64 = buffer.toString("base64");
+    try {
+      const result = await processWithModal(images, prompt, elevation);
 
-      try {
-        const result = await processWithModal(imageBase64, file.name, prompt, elevation);
-        
-        if ("callId" in result) {
-          // Async job - return job ID for polling
-          console.log(`✅ Modal async job created with call_id: ${result.callId}`);
-          return corsResponse(NextResponse.json({
-            success: true,
-            jobId: result.callId,
-            message: "Processing started asynchronously on Modal",
-          }));
-        } else {
-          // Synchronous result
-          console.log(`✅ Modal returned synchronous result`);
-          return corsResponse(NextResponse.json({
-            success: true,
-            status: "completed",
-            plyBase64: result.plyBase64,
-          }));
-        }
-      } catch (modalError) {
-        const errorMessage = modalError instanceof Error ? modalError.message : "Failed to process with Modal";
-        console.error("❌ Failed to process with Modal:", errorMessage);
-        
-        return corsResponse(NextResponse.json(
-          {
-            error: "Failed to start processing job. Please try again in a few minutes."
-          },
-          { status: 503 }
-        ));
-      }
-    } else {
-      // Local development - try to use Modal API directly
-      console.log("🚀 Using Modal AnySplat API for local development...");
-      
-      const imageBase64 = buffer.toString("base64");
-      
-      try {
-        const result = await processWithModal(imageBase64, file.name, prompt, elevation);
-        
-        if ("callId" in result) {
-          return corsResponse(NextResponse.json({
-            success: true,
-            jobId: result.callId,
-            message: "Processing started on Modal",
-          }));
-        } else {
-          return corsResponse(NextResponse.json({
-            success: true,
-            status: "completed",
-            plyBase64: result.plyBase64,
-          }));
-        }
-      } catch (error) {
-        console.error("❌ Modal API failed, falling back to local processing...", error);
-        
-        // Fallback to local processing (non-Modal)
-        await mkdir(UPLOADS_DIR, { recursive: true });
-        await mkdir(OUTPUTS_DIR, { recursive: true });
-
-        const sanitizedName = file.name.replace(/[^a-zA-Z0-9.-]/g, "_");
-        const inputFileName = `${jobId}_${sanitizedName}`;
-        const inputPath = path.join(UPLOADS_DIR, inputFileName);
-
-        await writeFile(inputPath, buffer);
-
-        const outputDir = path.join(OUTPUTS_DIR, jobId);
-        await mkdir(outputDir, { recursive: true });
-
-        await saveJobStatus(jobId, {
-          status: "processing",
-          fileName: file.name,
-          startTime: Date.now(),
-        });
-
-        console.log("Starting local 3D job (non-Modal):", jobId);
-        processLocally(inputPath, outputDir, jobId, file.name);
-
+      if ("callId" in result) {
+        console.log(`✅ Modal async job created with call_id: ${result.callId}`);
         return corsResponse(NextResponse.json({
           success: true,
-          jobId,
-          message: "Processing started locally",
+          jobId: result.callId,
+          message: `Processing ${files.length} image(s) on Modal`,
+        }));
+      } else {
+        console.log(`✅ Modal returned synchronous result`);
+        return corsResponse(NextResponse.json({
+          success: true,
+          status: "completed",
+          plyBase64: result.plyBase64,
         }));
       }
+    } catch (modalError) {
+      const errorMessage = modalError instanceof Error ? modalError.message : "Failed to process with Modal";
+      console.error("❌ Failed to process with Modal:", errorMessage);
+      return corsResponse(NextResponse.json(
+        { error: "Failed to start processing job. Please try again in a few minutes." },
+        { status: 503 }
+      ));
     }
   } catch (error) {
     console.error("Error processing:", error);
-    const errorResponse = NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to process image",
-      },
+    return corsResponse(NextResponse.json(
+      { error: error instanceof Error ? error.message : "Failed to process image" },
       { status: 500 }
-    );
-    return corsResponse(errorResponse);
+    ));
   }
 }
 
