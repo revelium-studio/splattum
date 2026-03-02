@@ -35,24 +35,40 @@ image = (
         "&& rm -rf /var/lib/apt/lists/*",
         # Clone AnySplat
         "git clone https://github.com/InternRobotics/AnySplat.git /opt/anysplat",
-        # Replace preinstalled torch with the version AnySplat is built for
-        "pip uninstall -y torch torchvision torchaudio || true",
+        # ── Phase 1: Remove the base-image torch and install the exact CUDA 12.1
+        #    build that AnySplat was developed against.  This MUST happen BEFORE
+        #    requirements.txt so that pytorch3d / torch_scatter / gsplat compile
+        #    against the right torch ABI.
+        "pip uninstall -y torch torchvision torchaudio torch-tensorrt || true",
         "pip install --no-cache-dir "
-        "torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 "
+        "torch==2.2.0+cu121 torchvision==0.17.0+cu121 torchaudio==2.2.0+cu121 "
         "--index-url https://download.pytorch.org/whl/cu121",
-        # Install AnySplat requirements (includes a prebuilt gsplat wheel for pt2.2/cu121)
+
+        # ── Phase 2: Install AnySplat requirements.  pytorch3d, torch_scatter,
+        #    gsplat etc. will now be compiled / resolved against torch 2.2.0+cu121.
         "pip install --no-cache-dir -r /opt/anysplat/requirements.txt",
-        # NUCLEAR FIX for OpenCV: The NVIDIA base image ships a broken system-level
-        # OpenCV whose cv2.dnn module is incompatible with pip-installed versions.
-        # We must physically delete every trace of cv2/opencv before installing a
-        # clean headless build.
+
+        # ── Phase 3: FORCE re-pin torch in case requirements.txt pulled a
+        #    different (CPU-only) version or xformers dragged in a mismatch.
+        "pip install --no-cache-dir --force-reinstall "
+        "torch==2.2.0+cu121 torchvision==0.17.0+cu121 torchaudio==2.2.0+cu121 "
+        "--index-url https://download.pytorch.org/whl/cu121",
+
+        # ── Phase 4: NUCLEAR FIX for OpenCV (NVIDIA base image conflict)
         "pip uninstall -y opencv-python opencv-python-headless "
         "opencv-contrib-python opencv-contrib-python-headless 2>/dev/null || true",
         "find /usr -name 'cv2*' -exec rm -rf {} + 2>/dev/null || true",
         "find /usr -name 'opencv*' -path '*/dist-packages/*' -exec rm -rf {} + 2>/dev/null || true",
-        "pip install --no-cache-dir opencv-python-headless==4.8.0.74",
-        # Pin numpy < 2 to avoid ABI mismatch with PyTorch 2.2 compiled against numpy 1.x
+        "pip install --no-cache-dir opencv-python-headless==4.8.0.76",
+
+        # ── Phase 5: Pin numpy < 2 (must be LAST to override any 2.x)
         "pip install --no-cache-dir 'numpy<2'",
+
+        # ── Phase 6: Verify torch sees CUDA at import time (no GPU needed)
+        'python -c "import torch; '
+        "print(f'torch={torch.__version__}  cuda={torch.version.cuda}  "
+        "backends.cudnn={torch.backends.cudnn.is_available()}'); "
+        "assert torch.version.cuda is not None, 'torch has NO CUDA support!'\"",
     )
 )
 
