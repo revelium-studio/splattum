@@ -210,7 +210,9 @@ def process_image(image_bytes_list: list[bytes], filenames: list[str], prompt: s
 
         # ------------------------------------------------------------------
         # Export to PLY with quality flags:
-        #   • save_sh_dc_only=False → keep full SH (degree 4) for richer colour
+        #   • save_sh_dc_only=True  → DC-band only; full SH (degree 4) makes
+        #     the file ~16× larger per Gaussian and exceeds Vercel's 4.5 MB
+        #     response limit when transferred as base64.
         #   • shift_and_scale=True  → normalise the scene to [-1, 1]
         # ------------------------------------------------------------------
         ply_path = tmpdir_path / "gaussians.ply"
@@ -222,7 +224,7 @@ def process_image(image_bytes_list: list[bytes], filenames: list[str], prompt: s
             gaussians.opacities[0],
             ply_path,
             shift_and_scale=True,
-            save_sh_dc_only=False,
+            save_sh_dc_only=True,
         )
 
         if not ply_path.exists():
