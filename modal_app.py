@@ -103,7 +103,7 @@ anysplat_image = (
 gen3c_image = (
     modal.Image.from_registry(
         "nvcr.io/nvidia/pytorch:24.10-py3",  # CUDA 12.6, Python 3.10
-        add_python=None,
+        add_python=None,                      # torch 2.5, TE, apex pre-installed
     )
     .env(
         {
@@ -121,72 +121,63 @@ gen3c_image = (
         "build-essential ninja-build cmake g++ gcc "
         "&& rm -rf /var/lib/apt/lists/*",
     )
+    # Fix grpclib conflict with Modal (from working GEN3C-MODAL reference)
+    .run_commands(
+        "pip uninstall -y grpclib grpcio 2>/dev/null || true",
+        "pip install --no-cache-dir grpclib==0.4.7",
+    )
     # Clone GEN3C repo
     .run_commands(
         "git clone --recursive https://github.com/nv-tlabs/GEN3C.git /opt/gen3c",
     )
-    # Phase 1: Replace base-image torch with 2.6.0+cu124
+    # Install GEN3C requirements — but KEEP the base image's torch, apex,
+    # and transformer-engine intact (they are pre-compiled for this CUDA).
+    # We pin torch/torchvision/torchaudio via a constraints file so pip
+    # can't upgrade them as transitive dependencies (e.g. megatron-core
+    # would otherwise pull torch 2.10 from NGC index, breaking TE).
     .run_commands(
-        "pip uninstall -y torch torchvision torchaudio torch-tensorrt || true",
-        "pip install --no-cache-dir "
-        "torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 "
-        "--index-url https://download.pytorch.org/whl/cu124",
-    )
-    # Phase 2: Install GEN3C requirements (minus torch/torchvision/torchaudio)
-    .run_commands(
+        # 1) Build constraints file from the base image's current torch
+        "python -c \""
+        "import torch, torchvision; "
+        "lines = ["
+        "f'torch=={torch.__version__}\\n',"
+        "f'torchvision=={torchvision.__version__}\\n',"
+        "]; "
+        "open('/tmp/torch_constraints.txt','w').writelines(lines); "
+        "print('Constraints:', [l.strip() for l in lines])\"",
+        # 2) Filter out torch/TE/apex lines from GEN3C requirements
         "cd /opt/gen3c && "
-        "grep -vE '^(torch|torchvision|torchaudio)==' requirements.txt > /tmp/gen3c_req.txt && "
-        "pip install --no-cache-dir -r /tmp/gen3c_req.txt",
+        "grep -vE '^(torch|torchvision|torchaudio|transformer.engine|apex)==' "
+        "requirements.txt > /tmp/gen3c_req.txt",
+        # 3) Install with constraints so torch is never upgraded
+        "pip install --no-cache-dir "
+        "--constraint /tmp/torch_constraints.txt "
+        "-r /tmp/gen3c_req.txt",
     )
-    # Phase 3: transformer-engine (required by megatron-core)
-    # MUST be built from source — the pip wheel's libtransformer_engine.so
-    # was compiled against a different torch ABI and won't load after we
-    # swapped to torch 2.6.0+cu124.
+    # MoGe depth model (also constrained to keep base torch)
     .run_commands(
-        "pip uninstall -y transformer-engine transformer_engine 2>/dev/null || true",
-        "git clone --branch v1.12.0 --recursive "
-        "https://github.com/NVIDIA/TransformerEngine.git /tmp/te && "
-        "cd /tmp/te && "
-        "NVTE_FRAMEWORK=pytorch NVTE_WITH_USERBUFFERS=0 MAX_JOBS=4 "
-        "pip install --no-cache-dir --no-build-isolation '.[pytorch]' && "
-        "rm -rf /tmp/te",
-        # Verify the .so actually loads
-        'python -c "'
-        "import transformer_engine; "
-        "import transformer_engine.pytorch; "
-        "print('transformer-engine OK')\"",
+        "pip install --no-cache-dir "
+        "--constraint /tmp/torch_constraints.txt "
+        "git+https://github.com/microsoft/MoGe.git",
     )
-    # Phase 4: NVIDIA apex (required by megatron-core)
-    # The base image has CUDA 12.6 but torch was built with cu124.  Apex's
-    # setup.py raises RuntimeError on this minor mismatch.  We patch it out —
-    # 12.6 is backward-compatible with 12.4 for all practical purposes.
-    .run_commands(
-        "git clone https://github.com/NVIDIA/apex /tmp/apex && "
-        "cd /tmp/apex && "
-        "sed -i 's/check_cuda_torch_binary_vs_bare_metal(CUDA_HOME)/pass  # patched: skip CUDA version check/' setup.py && "
-        "pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation "
-        '--config-settings "--global-option=--cpp_ext" '
-        '--config-settings "--global-option=--cuda_ext" . && '
-        "rm -rf /tmp/apex",
-    )
-    # Phase 5: MoGe depth model
-    .run_commands(
-        "pip install --no-cache-dir git+https://github.com/microsoft/MoGe.git",
-    )
-    # Phase 6: OpenCV fix + numpy pin
+    # OpenCV fix + numpy pin (keep numpy <2 for torch compat)
     .run_commands(
         "pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true",
-        "pip install --no-cache-dir opencv-python-headless==4.10.0.84",
+        "pip install --no-cache-dir opencv-python==4.8.0.74",
         "pip install --no-cache-dir 'numpy<2'",
     )
-    # Verify everything loads
+    # Verify core libraries (no GPU at build time — transformer_engine
+    # auto-imports .pytorch which calls torch.cuda.init, so we only
+    # check that the .so file exists on disk; full import at runtime).
     .run_commands(
         'python -c "'
         "import torch; "
         "print(f'torch={torch.__version__}  cuda={torch.version.cuda}'); "
         "assert torch.version.cuda is not None, 'No CUDA'; "
-        "import transformer_engine; import transformer_engine.pytorch; "
-        "print('transformer-engine OK'); "
+        "from pathlib import Path; "
+        "te_so = list(Path('/usr/local/lib/python3.10/dist-packages/transformer_engine').glob('*.so')); "
+        "assert len(te_so) > 0, 'transformer_engine .so missing'; "
+        "print(f'transformer-engine .so files: {len(te_so)}'); "
         "print('GEN3C image OK')\"",
     )
 )
