@@ -9,9 +9,14 @@ GEN3C: NVIDIA GEN3C-Cosmos-7B — generates orbit videos from a single image
   https://huggingface.co/nvidia/GEN3C-Cosmos-7B
 
 Pipeline (when GEN3C enabled):
-  1. GEN3C generates a 121-frame orbit video from the input image.
-  2. We sample 8–12 evenly-spaced frames from that video.
+  1. GEN3C generates a 121-frame orbit video at 704×1280 from the input image.
+  2. We sample 12 evenly-spaced keyframes from that video.
   3. Those frames are fed into AnySplat for denser 3DGS with fewer holes.
+
+Quality defaults (hardcoded for testing):
+  diffusion_steps = 22   (high quality, ~4-6 min)
+  movement_distance = 0.3 (wide orbit for strong parallax)
+  num_sampled_frames = 12  (gives AnySplat rich multi-view input)
 
 Deploy with: modal deploy modal_app.py
 """
@@ -261,7 +266,25 @@ def process_image(image_bytes_list: list[bytes], filenames: list[str], prompt: s
         tmpdir_path = Path(tmpdir)
 
         # ------------------------------------------------------------------
-        # Build views from all uploaded images
+        # Detect source: GEN3C frames vs user-uploaded images
+        # GEN3C frames have filenames like "gen3c_000.jpg"
+        # ------------------------------------------------------------------
+        is_gen3c_input = any(fn.startswith("gen3c_") for fn in filenames)
+        source_label = "GEN3C multi-view" if is_gen3c_input else "user upload"
+        print(f"🔍 DEBUG: source = {source_label}, num_images = {len(image_bytes_list)}")
+        print(f"🔍 DEBUG: filenames = {filenames}")
+
+        # ------------------------------------------------------------------
+        # Debug: save input frames for inspection
+        # ------------------------------------------------------------------
+        import uuid as _uuid
+        debug_run_id = _uuid.uuid4().hex[:8]
+        debug_dir = Path(f"/cache/debug/anysplat_run_{debug_run_id}")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        print(f"🔍 DEBUG: anysplat debug dir = {debug_dir}")
+
+        # ------------------------------------------------------------------
+        # Build views from all input images
         # ------------------------------------------------------------------
         views: list[torch.Tensor] = []
 
@@ -272,8 +295,11 @@ def process_image(image_bytes_list: list[bytes], filenames: list[str], prompt: s
             w, h = pil_img.size
             print(f"🖼️  Image {idx}: {fname} — {w}×{h}")
 
-            if len(image_bytes_list) == 1:
-                # ── Single image: create 6 augmented views for better 3D ──
+            # Save debug copy of every input frame
+            pil_img.save(str(debug_dir / f"input_{idx:03d}_{fname}"))
+
+            if len(image_bytes_list) == 1 and not is_gen3c_input:
+                # ── Single user image: create 6 augmented views for better 3D ──
                 # The shift amount is ~3-5% of image dimension.  Small enough
                 # to keep the subject in frame, large enough for parallax.
                 shift_x = max(12, int(w * 0.04))
@@ -284,18 +310,45 @@ def process_image(image_bytes_list: list[bytes], filenames: list[str], prompt: s
                 views.append(make_view(pil_img, dx=0, dy=-shift_y, zoom=1.0))  # up
                 views.append(make_view(pil_img, dx=0, dy=shift_y, zoom=1.0))   # down
                 views.append(make_view(pil_img, dx=0, dy=0, zoom=1.08))     # zoom in
+                print(f"🔍 DEBUG: single-image augmentation → 6 views")
             else:
-                # Multiple images: use each at centre crop
+                # GEN3C frames or multiple user images: use each as a centre crop.
+                # These already have real parallax; augmentation would dilute it.
                 views.append(make_view(pil_img, dx=0, dy=0, zoom=1.0))
 
         # AnySplat needs ≥ 2 views
         if len(views) < 2:
             views.append(views[0])
+            print(f"⚠️  Only {len(views)-1} view(s), duplicated to meet AnySplat minimum")
 
         num_views = len(views)
+
+        # ── HARD ASSERTION: GEN3C path must supply ≥ 6 views ─────────
+        if is_gen3c_input:
+            assert num_views >= 6, (
+                f"AnySplat expects ≥6 frames from GEN3C, but got {num_views}. "
+                f"Check gen3c_generate_views num_frames parameter."
+            )
+            print(f"✅ GEN3C assertion passed: {num_views} views ≥ 6")
+
         images = torch.stack(views, dim=0).unsqueeze(0).to(device)  # [1, V, 3, 448, 448]
         b, v, _, h_t, w_t = images.shape
+
+        # ── Detailed shape logging ──────────────────────────────────
         print(f"📐 AnySplat input: {num_views} views, tensor shape {images.shape}")
+        print(f"🔍 DEBUG: images.ndim={images.ndim}, images.shape[1]={images.shape[1]} (views)")
+        print(f"🔍 DEBUG: dtype={images.dtype}, device={images.device}")
+        print(f"🔍 DEBUG: value range = [{images.min().item():.2f}, {images.max().item():.2f}]")
+
+        # ── Assert correct dimensionality ──────────────────────────
+        # AnySplat expects [B, V, C, H, W] where B=1, V=num_views, C=3
+        assert images.ndim == 5, f"Expected 5D tensor [B,V,C,H,W], got {images.ndim}D: {images.shape}"
+        assert images.shape[1] >= 2, f"AnySplat needs ≥2 views, got {images.shape[1]}"
+        if is_gen3c_input:
+            assert images.shape[1] >= 6, (
+                f"GEN3C path: AnySplat tensor has only {images.shape[1]} views, "
+                f"expected ≥6. The GEN3C frames are NOT being used correctly!"
+            )
 
         # Run inference
         with torch.no_grad():
@@ -328,7 +381,10 @@ def process_image(image_bytes_list: list[bytes], filenames: list[str], prompt: s
 
         ply_size_mb = ply_path.stat().st_size / (1024 * 1024)
         print(f"✅ AnySplat PLY: {ply_path.stat().st_size:,} bytes ({ply_size_mb:.1f} MB), "
-              f"{num_gaussians:,} gaussians, full SH, shift+scale normalised")
+              f"{num_gaussians:,} gaussians, DC-only SH, shift+scale normalised")
+        print(f"🔍 DEBUG: source={source_label}, views={num_views}, "
+              f"gaussians={num_gaussians:,}, ply_mb={ply_size_mb:.1f}")
+        print(f"🔍 DEBUG: debug frames saved to {debug_dir}")
         return ply_path.read_bytes()
 
 
@@ -343,9 +399,9 @@ def process_image(image_bytes_list: list[bytes], filenames: list[str], prompt: s
 )
 def gen3c_generate_views(
     image_bytes: bytes,
-    diffusion_steps: int = 12,
-    movement_distance: float = 0.2,
-    num_frames: int = 10,
+    diffusion_steps: int = 22,
+    movement_distance: float = 0.3,
+    num_frames: int = 12,
 ) -> list[bytes]:
     """
     Generate multi-view frames from a single image using NVIDIA GEN3C-Cosmos-7B.
@@ -354,16 +410,18 @@ def gen3c_generate_views(
       1. Download checkpoints (cached in volume after first run).
       2. Predict depth with MoGe.
       3. Create 3D cache and camera trajectory (clockwise orbit).
-      4. Generate 121-frame video with Gen3cPipeline.
-      5. Sample `num_frames` evenly-spaced JPEG frames.
+      4. Generate 121-frame video with Gen3cPipeline at 704×1280.
+      5. Sample `num_frames` evenly-spaced keyframes.
+      6. Save debug frames to /cache/debug/gen3c_run_<uuid>/.
 
-    Returns a list of JPEG byte buffers.
+    Returns a list of JPEG byte buffers (12 keyframes by default).
     """
     import io
     import os
     import sys
     import tempfile
     import time
+    import uuid
 
     import numpy as np
     import torch
@@ -374,6 +432,12 @@ def gen3c_generate_views(
 
     device = "cuda"
     torch.enable_grad(False)
+
+    # ── Debug directory for this run ────────────────────────────────
+    run_id = uuid.uuid4().hex[:8]
+    debug_dir = f"/cache/debug/gen3c_run_{run_id}"
+    os.makedirs(debug_dir, exist_ok=True)
+    print(f"🔍 DEBUG: gen3c debug dir = {debug_dir}")
 
     # GEN3C repo on the Python path
     sys.path.insert(0, "/opt/gen3c")
@@ -509,21 +573,63 @@ def gen3c_generate_views(
     video = output[0]  # (T, H, W, 3) numpy uint8
 
     t2 = time.time()
-    print(f"🎬 GEN3C produced {video.shape[0]} frames ({video.shape[1]}×{video.shape[2]}) in {t2 - t0:.1f}s")
+    total_video_frames = video.shape[0]
+    vid_h, vid_w = video.shape[1], video.shape[2]
+    print(f"🎬 GEN3C produced {total_video_frames} frames ({vid_h}×{vid_w}) in {t2 - t0:.1f}s")
 
-    # ── Extract evenly-spaced frames as JPEG bytes ──────────────────
-    T = video.shape[0]
-    indices = np.linspace(0, T - 1, num_frames, dtype=int)
+    # ── Save ALL video frames for debugging (first & last + every 10th) ──
+    for fi in range(total_video_frames):
+        if fi == 0 or fi == total_video_frames - 1 or fi % 10 == 0:
+            dbg_path = os.path.join(debug_dir, f"video_frame_{fi:03d}.png")
+            Image.fromarray(video[fi]).save(dbg_path)
+    print(f"🔍 DEBUG: saved video frame samples to {debug_dir}/video_frame_*.png")
+
+    # ── Sample evenly-spaced keyframes ──────────────────────────────
+    # sample_keyframes: pick `num_frames` indices equally spaced across
+    # the 121-frame orbit video.  Skip first/last 5% to avoid near-
+    # duplicate start/end frames.
+    margin = max(1, int(total_video_frames * 0.05))  # ~6 frames margin
+    usable_start = margin
+    usable_end = total_video_frames - 1 - margin
+    indices = np.linspace(usable_start, usable_end, num_frames, dtype=int)
+    print(f"🔍 DEBUG: sampling {num_frames} keyframes at indices: {indices.tolist()}")
+    print(f"🔍 DEBUG: usable range [{usable_start}, {usable_end}] from {total_video_frames} total")
+
+    # ── Save sampled keyframes (debug) + encode as JPEG bytes ───────
+    sampled_debug_dir = os.path.join(debug_dir, "anysplat_input")
+    os.makedirs(sampled_debug_dir, exist_ok=True)
 
     frames: list[bytes] = []
-    for idx in indices:
+    for i, idx in enumerate(indices):
+        frame_img = Image.fromarray(video[idx])
+        frame_w, frame_h = frame_img.size
+
+        # Save debug copy
+        dbg_path = os.path.join(sampled_debug_dir, f"frame_{i:03d}_vidx{idx}.png")
+        frame_img.save(dbg_path)
+
+        # Encode as JPEG
         buf = io.BytesIO()
-        Image.fromarray(video[idx]).save(buf, format="JPEG", quality=95)
+        frame_img.save(buf, format="JPEG", quality=95)
         frames.append(buf.getvalue())
 
     os.unlink(input_path)
     total_kb = sum(len(f) for f in frames) / 1024
-    print(f"🎬 Extracted {len(frames)} frames ({total_kb:.0f} KB total)")
+    print(f"🎬 Extracted {len(frames)} keyframes ({total_kb:.0f} KB total)")
+    print(f"🔍 DEBUG: keyframe resolution = {vid_h}×{vid_w}")
+    print(f"🔍 DEBUG: saved sampled keyframes to {sampled_debug_dir}/")
+
+    # ── Sanity check: frames must be visually distinct ──────────────
+    # Compare first and last sampled frame pixel-wise
+    first_arr = np.array(Image.open(io.BytesIO(frames[0])).convert("RGB"))
+    last_arr = np.array(Image.open(io.BytesIO(frames[-1])).convert("RGB"))
+    mean_diff = np.abs(first_arr.astype(float) - last_arr.astype(float)).mean()
+    print(f"🔍 DEBUG: mean pixel diff between first/last sampled frame = {mean_diff:.1f} "
+          f"(should be >5.0 for meaningful parallax)")
+    if mean_diff < 2.0:
+        print("⚠️  WARNING: GEN3C frames look almost identical! "
+              "Try increasing movement_distance or diffusion_steps.")
+
     return frames
 
 
@@ -539,17 +645,20 @@ def gen3c_generate_views(
 def gen3c_pipeline(
     image_bytes_list: list[bytes],
     filenames: list[str],
-    diffusion_steps: int = 12,
-    movement_distance: float = 0.2,
+    diffusion_steps: int = 22,
+    movement_distance: float = 0.3,
     prompt: str = "",
     elevation: int = 20,
 ) -> bytes:
     """
     Orchestrate: GEN3C multi-view video → AnySplat 3DGS reconstruction.
 
-    1. Send the first image to GEN3C to generate orbit video frames.
-    2. Feed those frames into AnySplat for dense 3D Gaussian Splat reconstruction.
-    3. Return the PLY bytes.
+    1. Send the first image to GEN3C to generate 121-frame orbit video.
+    2. GEN3C samples 12 evenly-spaced keyframes from that video.
+    3. Feed those 12 frames into AnySplat for dense 3DGS reconstruction.
+    4. Return the PLY bytes.
+
+    Quality defaults: steps=22, distance=0.3, 12 sampled frames.
     """
     import time
 
@@ -557,7 +666,8 @@ def gen3c_pipeline(
     print(
         f"🎬 GEN3C Pipeline started: "
         f"steps={diffusion_steps}, dist={movement_distance}, "
-        f"images={len(image_bytes_list)}"
+        f"images={len(image_bytes_list)}, "
+        f"will sample 12 keyframes from 121-frame orbit video"
     )
 
     # Step 1 — GEN3C: generate multi-view frames (uses first image)
@@ -565,17 +675,28 @@ def gen3c_pipeline(
         image_bytes_list[0],
         diffusion_steps=diffusion_steps,
         movement_distance=movement_distance,
-        num_frames=10,
+        num_frames=12,   # ← 12 keyframes for rich multi-view input
     )
     t1 = time.time()
-    print(f"🎬 GEN3C produced {len(frames)} frames in {t1 - t0:.1f}s")
+    print(f"🎬 GEN3C produced {len(frames)} keyframes in {t1 - t0:.1f}s")
+    print(f"🔍 DEBUG: frame sizes (bytes): {[len(f) for f in frames]}")
+
+    # Verify we got enough frames
+    assert len(frames) >= 6, (
+        f"GEN3C returned only {len(frames)} frames, need ≥6 for quality. "
+        f"Check gen3c_generate_views."
+    )
 
     # Step 2 — AnySplat: reconstruct 3DGS from those frames
+    #   Filenames start with "gen3c_" so process_image can detect the source.
     frame_names = [f"gen3c_{i:03d}.jpg" for i in range(len(frames))]
+    print(f"🔍 DEBUG: sending {len(frames)} frames to AnySplat: {frame_names}")
     ply_bytes = process_image.remote(frames, frame_names, prompt, elevation)
     t2 = time.time()
+    ply_size_mb = len(ply_bytes) / (1024 * 1024)
     print(
-        f"🔮 AnySplat processed {len(frames)} views in {t2 - t1:.1f}s. "
+        f"🔮 AnySplat processed {len(frames)} GEN3C views in {t2 - t1:.1f}s. "
+        f"PLY size: {ply_size_mb:.1f} MB. "
         f"Total pipeline: {t2 - t0:.1f}s"
     )
 
@@ -627,10 +748,10 @@ async def anysplat_router(request: dict) -> dict:
         prompt = request.get("prompt", "")
         elevation = request.get("elevation", 20)
 
-        # GEN3C parameters
+        # GEN3C parameters (quality defaults: 22 steps, 0.3 distance)
         gen3c_enabled = bool(request.get("gen3c_enabled", False))
-        gen3c_diffusion_steps = int(request.get("gen3c_diffusion_steps", 12))
-        gen3c_movement_distance = float(request.get("gen3c_movement_distance", 0.2))
+        gen3c_diffusion_steps = int(request.get("gen3c_diffusion_steps", 22))
+        gen3c_movement_distance = float(request.get("gen3c_movement_distance", 0.3))
 
         # Collect images into lists
         images_b64: list[str] = []
@@ -689,8 +810,8 @@ async def anysplat_router(request: dict) -> dict:
         else:
             ply_bytes = process_image.remote(image_bytes_list, filenames, prompt, elevation)
 
-        ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
-        return {"success": True, "ply": ply_b64}
+            ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
+            return {"success": True, "ply": ply_b64}
 
     except Exception as e:
         import traceback

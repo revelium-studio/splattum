@@ -39,10 +39,10 @@ export default function Home() {
   const [result, setResult] = useState<ProcessedResult | null>(null);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  // GEN3C settings
-  const [gen3cEnabled, setGen3cEnabled] = useState(false);
-  const [gen3cDiffusionSteps, setGen3cDiffusionSteps] = useState(12);
-  const [gen3cMovementDistance, setGen3cMovementDistance] = useState(0.2);
+  // GEN3C settings — defaults tuned for quality (ON by default)
+  const [gen3cEnabled, setGen3cEnabled] = useState(true);
+  const [gen3cDiffusionSteps, setGen3cDiffusionSteps] = useState(18);
+  const [gen3cMovementDistance, setGen3cMovementDistance] = useState(0.3);
 
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const progressRef = useRef<NodeJS.Timeout | null>(null);

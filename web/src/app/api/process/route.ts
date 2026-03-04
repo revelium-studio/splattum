@@ -73,7 +73,7 @@ async function processWithModal(
   images: Array<{ base64: string; filename: string }>,
   prompt: string = "",
   elevation: number = 20,
-  gen3c: Gen3cConfig = { enabled: false, diffusionSteps: 12, movementDistance: 0.2 }
+  gen3c: Gen3cConfig = { enabled: true, diffusionSteps: 18, movementDistance: 0.3 }
 ): Promise<{ callId: string } | { plyBase64: string }> {
   const mode = gen3c.enabled ? "GEN3C → AnySplat" : "AnySplat";
   console.log(`🚀 Sending ${images.length} image(s) to Modal (${mode})...`);
@@ -248,11 +248,11 @@ export async function POST(request: NextRequest) {
     // Extract GEN3C settings from formData
     const gen3cEnabled = formData.get("gen3c_enabled") === "true";
     const gen3cDiffusionSteps = parseInt(
-      (formData.get("gen3c_diffusion_steps") as string) || "12",
+      (formData.get("gen3c_diffusion_steps") as string) || "18",
       10
     );
     const gen3cMovementDistance = parseFloat(
-      (formData.get("gen3c_movement_distance") as string) || "0.2"
+      (formData.get("gen3c_movement_distance") as string) || "0.3"
     );
 
     const mode = gen3cEnabled ? "GEN3C → AnySplat" : "AnySplat";

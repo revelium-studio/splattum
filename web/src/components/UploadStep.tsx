@@ -309,7 +309,7 @@ export default function UploadStep({
                         <input
                           type="range"
                           min={10}
-                          max={15}
+                          max={25}
                           step={1}
                           value={gen3cDiffusionSteps}
                           onChange={(e) =>
@@ -319,7 +319,7 @@ export default function UploadStep({
                         />
                         <div className="flex justify-between text-[10px] text-muted/60 mt-0.5">
                           <span>10 (faster)</span>
-                          <span>15 (higher quality)</span>
+                          <span>25 (highest quality)</span>
                         </div>
                       </div>
 
@@ -334,7 +334,7 @@ export default function UploadStep({
                         <input
                           type="range"
                           min={10}
-                          max={30}
+                          max={50}
                           step={1}
                           value={Math.round(gen3cMovementDistance * 100)}
                           onChange={(e) =>
@@ -346,14 +346,15 @@ export default function UploadStep({
                         />
                         <div className="flex justify-between text-[10px] text-muted/60 mt-0.5">
                           <span>0.10 (subtle)</span>
-                          <span>0.30 (wide orbit)</span>
+                          <span>0.50 (wide orbit)</span>
                         </div>
                       </div>
                     </div>
 
                     <p className="text-primary/60 text-[10px] mt-3 leading-relaxed">
-                      ℹ️ GEN3C adds ~3-5 min to processing. More steps → better
-                      quality. More distance → wider orbit, better coverage.
+                      ℹ️ GEN3C adds ~4-8 min to processing. More steps → better
+                      quality. More distance → wider orbit, denser coverage.
+                      Recommended: 18+ steps, 0.3+ distance.
                     </p>
                   </motion.div>
                 )}
