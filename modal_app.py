@@ -337,7 +337,7 @@ def process_image(image_bytes_list: list[bytes], filenames: list[str], prompt: s
 # ═════════════════════════════════════════════════════════════════════
 @app.function(
     image=gen3c_image,
-    gpu=modal.gpu.A100(size="80GB"),  # GEN3C needs ~43 GB VRAM with full offloading
+    gpu="A100-80GB",  # GEN3C needs ~43 GB VRAM with full offloading
     timeout=900,
     volumes={"/cache": gen3c_volume},
 )
