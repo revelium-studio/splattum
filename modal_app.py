@@ -139,8 +139,22 @@ gen3c_image = (
         "pip install --no-cache-dir -r /tmp/gen3c_req.txt",
     )
     # Phase 3: transformer-engine (required by megatron-core)
+    # MUST be built from source — the pip wheel's libtransformer_engine.so
+    # was compiled against a different torch ABI and won't load after we
+    # swapped to torch 2.6.0+cu124.
     .run_commands(
-        "pip install --no-cache-dir 'transformer-engine[pytorch]==1.12.0'",
+        "pip uninstall -y transformer-engine transformer_engine 2>/dev/null || true",
+        "git clone --branch v1.12.0 --recursive "
+        "https://github.com/NVIDIA/TransformerEngine.git /tmp/te && "
+        "cd /tmp/te && "
+        "NVTE_FRAMEWORK=pytorch NVTE_WITH_USERBUFFERS=0 MAX_JOBS=4 "
+        "pip install --no-cache-dir --no-build-isolation '.[pytorch]' && "
+        "rm -rf /tmp/te",
+        # Verify the .so actually loads
+        'python -c "'
+        "import transformer_engine; "
+        "import transformer_engine.pytorch; "
+        "print('transformer-engine OK')\"",
     )
     # Phase 4: NVIDIA apex (required by megatron-core)
     # The base image has CUDA 12.6 but torch was built with cu124.  Apex's
@@ -165,12 +179,14 @@ gen3c_image = (
         "pip install --no-cache-dir opencv-python-headless==4.10.0.84",
         "pip install --no-cache-dir 'numpy<2'",
     )
-    # Verify
+    # Verify everything loads
     .run_commands(
         'python -c "'
         "import torch; "
         "print(f'torch={torch.__version__}  cuda={torch.version.cuda}'); "
         "assert torch.version.cuda is not None, 'No CUDA'; "
+        "import transformer_engine; import transformer_engine.pytorch; "
+        "print('transformer-engine OK'); "
         "print('GEN3C image OK')\"",
     )
 )
