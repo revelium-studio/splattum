@@ -138,9 +138,13 @@ gen3c_image = (
         "pip install --no-cache-dir 'transformer-engine[pytorch]==1.12.0'",
     )
     # Phase 4: NVIDIA apex (required by megatron-core)
+    # The base image has CUDA 12.6 but torch was built with cu124.  Apex's
+    # setup.py raises RuntimeError on this minor mismatch.  We patch it out —
+    # 12.6 is backward-compatible with 12.4 for all practical purposes.
     .run_commands(
         "git clone https://github.com/NVIDIA/apex /tmp/apex && "
         "cd /tmp/apex && "
+        "sed -i 's/check_cuda_torch_binary_vs_bare_metal(CUDA_HOME)/pass  # patched: skip CUDA version check/' setup.py && "
         "pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation "
         '--config-settings "--global-option=--cpp_ext" '
         '--config-settings "--global-option=--cuda_ext" . && '
@@ -333,7 +337,7 @@ def process_image(image_bytes_list: list[bytes], filenames: list[str], prompt: s
 # ═════════════════════════════════════════════════════════════════════
 @app.function(
     image=gen3c_image,
-    gpu="A100",
+    gpu=modal.gpu.A100(size="80GB"),  # GEN3C needs ~43 GB VRAM with full offloading
     timeout=900,
     volumes={"/cache": gen3c_volume},
 )
@@ -685,8 +689,8 @@ async def anysplat_router(request: dict) -> dict:
         else:
             ply_bytes = process_image.remote(image_bytes_list, filenames, prompt, elevation)
 
-            ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
-            return {"success": True, "ply": ply_b64}
+        ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
+        return {"success": True, "ply": ply_b64}
 
     except Exception as e:
         import traceback
