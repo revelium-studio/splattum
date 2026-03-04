@@ -61,14 +61,26 @@ async function getJobStatus(jobId: string): Promise<JobStatus | null> {
   return JSON.parse(data);
 }
 
+// GEN3C + Modal configuration
+interface Gen3cConfig {
+  enabled: boolean;
+  diffusionSteps: number;
+  movementDistance: number;
+}
+
 // Process with Modal (GPU cloud) — supports single or multiple images
 async function processWithModal(
   images: Array<{ base64: string; filename: string }>,
   prompt: string = "",
-  elevation: number = 20
+  elevation: number = 20,
+  gen3c: Gen3cConfig = { enabled: false, diffusionSteps: 12, movementDistance: 0.2 }
 ): Promise<{ callId: string } | { plyBase64: string }> {
-  console.log(`🚀 Sending ${images.length} image(s) to Modal AnySplat router endpoint...`);
+  const mode = gen3c.enabled ? "GEN3C → AnySplat" : "AnySplat";
+  console.log(`🚀 Sending ${images.length} image(s) to Modal (${mode})...`);
   console.log(`📍 Modal endpoint: ${MODAL_ENDPOINT}`);
+  if (gen3c.enabled) {
+    console.log(`   GEN3C: steps=${gen3c.diffusionSteps}, distance=${gen3c.movementDistance}`);
+  }
 
   // Build the request body.  If only one image, use backward-compatible
   // single-image fields.  If multiple, use the "images" array.
@@ -81,6 +93,9 @@ async function processWithModal(
       prompt,
       elevation,
       async: true,
+      gen3c_enabled: gen3c.enabled,
+      gen3c_diffusion_steps: gen3c.diffusionSteps,
+      gen3c_movement_distance: gen3c.movementDistance,
     };
   } else {
     body = {
@@ -89,6 +104,9 @@ async function processWithModal(
       prompt,
       elevation,
       async: true,
+      gen3c_enabled: gen3c.enabled,
+      gen3c_diffusion_steps: gen3c.diffusionSteps,
+      gen3c_movement_distance: gen3c.movementDistance,
     };
   }
 
@@ -227,7 +245,21 @@ export async function POST(request: NextRequest) {
       return corsResponse(NextResponse.json({ error: "No image provided" }, { status: 400 }));
     }
 
-    console.log(`🚀 Starting Modal AnySplat processing with ${files.length} image(s)...`);
+    // Extract GEN3C settings from formData
+    const gen3cEnabled = formData.get("gen3c_enabled") === "true";
+    const gen3cDiffusionSteps = parseInt(
+      (formData.get("gen3c_diffusion_steps") as string) || "12",
+      10
+    );
+    const gen3cMovementDistance = parseFloat(
+      (formData.get("gen3c_movement_distance") as string) || "0.2"
+    );
+
+    const mode = gen3cEnabled ? "GEN3C → AnySplat" : "AnySplat";
+    console.log(`🚀 Starting Modal ${mode} processing with ${files.length} image(s)...`);
+    if (gen3cEnabled) {
+      console.log(`   GEN3C: steps=${gen3cDiffusionSteps}, distance=${gen3cMovementDistance}`);
+    }
 
     // Convert all files to base64
     const images: Array<{ base64: string; filename: string }> = [];
@@ -238,7 +270,11 @@ export async function POST(request: NextRequest) {
     }
 
     try {
-      const result = await processWithModal(images, prompt, elevation);
+      const result = await processWithModal(images, prompt, elevation, {
+        enabled: gen3cEnabled,
+        diffusionSteps: gen3cDiffusionSteps,
+        movementDistance: gen3cMovementDistance,
+      });
 
       if ("callId" in result) {
         console.log(`✅ Modal async job created with call_id: ${result.callId}`);

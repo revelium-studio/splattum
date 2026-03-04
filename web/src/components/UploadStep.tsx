@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState, useRef } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { Upload, Image as ImageIcon, X, ArrowRight, AlertCircle } from "lucide-react";
 
 interface UploadStepProps {
@@ -14,6 +14,13 @@ interface UploadStepProps {
   onProcess: () => void;
   onClear: () => void;
   error?: string | null;
+  // GEN3C settings
+  gen3cEnabled: boolean;
+  gen3cDiffusionSteps: number;
+  gen3cMovementDistance: number;
+  onGen3cToggle: (enabled: boolean) => void;
+  onGen3cDiffusionStepsChange: (steps: number) => void;
+  onGen3cMovementDistanceChange: (distance: number) => void;
 }
 
 export default function UploadStep({
@@ -26,6 +33,12 @@ export default function UploadStep({
   onProcess,
   onClear,
   error,
+  gen3cEnabled,
+  gen3cDiffusionSteps,
+  gen3cMovementDistance,
+  onGen3cToggle,
+  onGen3cDiffusionStepsChange,
+  onGen3cMovementDistanceChange,
 }: UploadStepProps) {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -235,6 +248,120 @@ export default function UploadStep({
           )}
         </motion.div>
 
+        {/* ─── GEN3C Settings Panel ─────────────────────────────── */}
+        {uploadedImage && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.15, duration: 0.4 }}
+            className="mt-4 w-full max-w-2xl"
+          >
+            <div className="bg-card border border-border rounded-2xl p-5 sm:p-6">
+              {/* Toggle header */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span className="text-base">⚡</span>
+                  <span className="text-foreground font-semibold text-sm">
+                    GEN3C Multi-View Enhancement
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={gen3cEnabled}
+                  onClick={() => onGen3cToggle(!gen3cEnabled)}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus-visible:ring-2 focus-visible:ring-primary ${
+                    gen3cEnabled ? "bg-primary" : "bg-border"
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                      gen3cEnabled ? "translate-x-6" : "translate-x-1"
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <AnimatePresence>
+                {gen3cEnabled && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ duration: 0.25 }}
+                    className="overflow-hidden"
+                  >
+                    <p className="text-muted text-xs leading-relaxed mt-3 mb-4">
+                      When enabled, we first use NVIDIA GEN3C to generate multiple
+                      views, then reconstruct 3D Gaussians with AnySplat. This fills
+                      holes and improves splat density.
+                    </p>
+
+                    <div className="space-y-4">
+                      {/* Diffusion Steps */}
+                      <div>
+                        <div className="flex justify-between text-xs mb-1.5">
+                          <span className="text-muted">Diffusion Steps</span>
+                          <span className="text-foreground font-medium tabular-nums">
+                            {gen3cDiffusionSteps}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={10}
+                          max={15}
+                          step={1}
+                          value={gen3cDiffusionSteps}
+                          onChange={(e) =>
+                            onGen3cDiffusionStepsChange(Number(e.target.value))
+                          }
+                          className="w-full accent-primary h-1.5 rounded-full appearance-none bg-border cursor-pointer"
+                        />
+                        <div className="flex justify-between text-[10px] text-muted/60 mt-0.5">
+                          <span>10 (faster)</span>
+                          <span>15 (higher quality)</span>
+                        </div>
+                      </div>
+
+                      {/* Movement Distance */}
+                      <div>
+                        <div className="flex justify-between text-xs mb-1.5">
+                          <span className="text-muted">Movement Distance</span>
+                          <span className="text-foreground font-medium tabular-nums">
+                            {gen3cMovementDistance.toFixed(2)}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={10}
+                          max={30}
+                          step={1}
+                          value={Math.round(gen3cMovementDistance * 100)}
+                          onChange={(e) =>
+                            onGen3cMovementDistanceChange(
+                              Number(e.target.value) / 100
+                            )
+                          }
+                          className="w-full accent-primary h-1.5 rounded-full appearance-none bg-border cursor-pointer"
+                        />
+                        <div className="flex justify-between text-[10px] text-muted/60 mt-0.5">
+                          <span>0.10 (subtle)</span>
+                          <span>0.30 (wide orbit)</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <p className="text-primary/60 text-[10px] mt-3 leading-relaxed">
+                      ℹ️ GEN3C adds ~3-5 min to processing. More steps → better
+                      quality. More distance → wider orbit, better coverage.
+                    </p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </motion.div>
+        )}
+
         {/* Error message */}
         {error && (
           <motion.div
@@ -254,7 +381,7 @@ export default function UploadStep({
       <footer className="py-4 sm:py-6 text-center px-4 sm:px-0">
         <div className="w-[90%] sm:w-1/2 mx-auto">
           <p className="text-[10px] font-medium opacity-50 leading-tight sm:leading-relaxed">
-            Disclaimer. This demo uses the AnySplat model ([InternRobotics/AnySplat](https://github.com/InternRobotics/AnySplat), [lhjiang/anysplat](https://huggingface.co/lhjiang/anysplat)) for 3D Gaussian Splat generation. All outputs are experimental and provided "as is." You are solely responsible for any use of the results. By uploading images, you confirm you have the necessary rights and that your content does not violate any laws or third-party rights.
+            Disclaimer. This demo uses the AnySplat model ([InternRobotics/AnySplat](https://github.com/InternRobotics/AnySplat), [lhjiang/anysplat](https://huggingface.co/lhjiang/anysplat)) for 3D Gaussian Splat generation. All outputs are experimental and provided &quot;as is.&quot; You are solely responsible for any use of the results. By uploading images, you confirm you have the necessary rights and that your content does not violate any laws or third-party rights.
           </p>
         </div>
       </footer>

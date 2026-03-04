@@ -39,6 +39,11 @@ export default function Home() {
   const [result, setResult] = useState<ProcessedResult | null>(null);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // GEN3C settings
+  const [gen3cEnabled, setGen3cEnabled] = useState(false);
+  const [gen3cDiffusionSteps, setGen3cDiffusionSteps] = useState(12);
+  const [gen3cMovementDistance, setGen3cMovementDistance] = useState(0.2);
+
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const progressRef = useRef<NodeJS.Timeout | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -280,7 +285,16 @@ export default function Home() {
       formData.append("image", uploadedImage);
     }
 
-    console.log(`🚀 Starting AnySplat processing with ${uploadedImages.length} image(s)...`);
+    // GEN3C settings
+    formData.append("gen3c_enabled", gen3cEnabled ? "true" : "false");
+    formData.append("gen3c_diffusion_steps", gen3cDiffusionSteps.toString());
+    formData.append("gen3c_movement_distance", gen3cMovementDistance.toString());
+
+    const mode = gen3cEnabled ? "GEN3C → AnySplat" : "AnySplat";
+    console.log(`🚀 Starting ${mode} processing with ${uploadedImages.length} image(s)...`);
+    if (gen3cEnabled) {
+      console.log(`   GEN3C: steps=${gen3cDiffusionSteps}, distance=${gen3cMovementDistance}`);
+    }
 
     try {
       console.log("Submitting image for processing...");
@@ -453,7 +467,7 @@ export default function Home() {
       setState("upload");
       setProgress(0);
     }
-  }, [uploadedImage, uploadedImages, imagePreview, pollJobStatus]);
+  }, [uploadedImage, uploadedImages, imagePreview, pollJobStatus, gen3cEnabled, gen3cDiffusionSteps, gen3cMovementDistance]);
 
   const handleReset = useCallback(() => {
     if (pollingRef.current) clearInterval(pollingRef.current);
@@ -498,6 +512,12 @@ export default function Home() {
                 setError(null);
               }}
               error={error}
+              gen3cEnabled={gen3cEnabled}
+              gen3cDiffusionSteps={gen3cDiffusionSteps}
+              gen3cMovementDistance={gen3cMovementDistance}
+              onGen3cToggle={setGen3cEnabled}
+              onGen3cDiffusionStepsChange={setGen3cDiffusionSteps}
+              onGen3cMovementDistanceChange={setGen3cMovementDistance}
             />
           </motion.div>
         )}

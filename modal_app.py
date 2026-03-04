@@ -1,22 +1,32 @@
 """
-Modal app for running AnySplat on GPU.
+Modal app for running AnySplat on GPU, with optional GEN3C multi-view enhancement.
+
 AnySplat: Feed-forward 3D Gaussian Splatting from Unconstrained Views
-Project page: https://city-super.github.io/anysplat/
-Code: https://github.com/InternRobotics/AnySplat
-Hugging Face: https://huggingface.co/lhjiang/anysplat
+  https://github.com/InternRobotics/AnySplat
+
+GEN3C: NVIDIA GEN3C-Cosmos-7B — generates orbit videos from a single image
+  https://github.com/nv-tlabs/GEN3C
+  https://huggingface.co/nvidia/GEN3C-Cosmos-7B
+
+Pipeline (when GEN3C enabled):
+  1. GEN3C generates a 121-frame orbit video from the input image.
+  2. We sample 8–12 evenly-spaced frames from that video.
+  3. Those frames are fed into AnySplat for denser 3DGS with fewer holes.
 
 Deploy with: modal deploy modal_app.py
 """
 
 import modal
 
-# Create the Modal app
+# ─────────────────────────────────────────────────────────────────────
+# App
+# ─────────────────────────────────────────────────────────────────────
 app = modal.App("anysplat")
 
-# AnySplat is developed for Python 3.10, PyTorch 2.2.0 and CUDA 12.1.
-# We start from NVIDIA's PyTorch image, then replace the preinstalled torch
-# with the exact 2.2.0/cu121 stack and install AnySplat + its dependencies.
-image = (
+# ═════════════════════════════════════════════════════════════════════
+# IMAGE 1 — AnySplat (PyTorch 2.2.0 / CUDA 12.1)
+# ═════════════════════════════════════════════════════════════════════
+anysplat_image = (
     modal.Image.from_registry(
         "nvcr.io/nvidia/pytorch:24.07-py3",  # PyTorch 2.4.0 + CUDA 12.5, Python 3.10
         add_python=None,
@@ -80,12 +90,94 @@ image = (
     )
 )
 
-# Volume for caching Hugging Face weights and AnySplat assets
+# ═════════════════════════════════════════════════════════════════════
+# IMAGE 2 — GEN3C (PyTorch 2.6.0 / CUDA 12.4)
+#   NVIDIA GEN3C-Cosmos-7B for multi-view orbit video generation.
+#   Build takes ~30-60 min on first deploy (apex from source).
+# ═════════════════════════════════════════════════════════════════════
+gen3c_image = (
+    modal.Image.from_registry(
+        "nvcr.io/nvidia/pytorch:24.10-py3",  # CUDA 12.6, Python 3.10
+        add_python=None,
+    )
+    .env(
+        {
+            "TORCH_CUDA_ARCH_LIST": "8.0;9.0",  # A100 + H100
+            "DEBIAN_FRONTEND": "noninteractive",
+            "MAX_JOBS": "4",
+            "CUDA_HOME": "/usr/local/cuda",
+            "PYTHONPATH": "/opt/gen3c",
+        }
+    )
+    # System deps
+    .run_commands(
+        "apt-get update && apt-get install -y "
+        "git ffmpeg libgl1-mesa-glx libglib2.0-0 "
+        "build-essential ninja-build cmake g++ gcc "
+        "&& rm -rf /var/lib/apt/lists/*",
+    )
+    # Clone GEN3C repo
+    .run_commands(
+        "git clone --recursive https://github.com/nv-tlabs/GEN3C.git /opt/gen3c",
+    )
+    # Phase 1: Replace base-image torch with 2.6.0+cu124
+    .run_commands(
+        "pip uninstall -y torch torchvision torchaudio torch-tensorrt || true",
+        "pip install --no-cache-dir "
+        "torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 "
+        "--index-url https://download.pytorch.org/whl/cu124",
+    )
+    # Phase 2: Install GEN3C requirements (minus torch/torchvision/torchaudio)
+    .run_commands(
+        "cd /opt/gen3c && "
+        "grep -vE '^(torch|torchvision|torchaudio)==' requirements.txt > /tmp/gen3c_req.txt && "
+        "pip install --no-cache-dir -r /tmp/gen3c_req.txt",
+    )
+    # Phase 3: transformer-engine (required by megatron-core)
+    .run_commands(
+        "pip install --no-cache-dir 'transformer-engine[pytorch]==1.12.0'",
+    )
+    # Phase 4: NVIDIA apex (required by megatron-core)
+    .run_commands(
+        "git clone https://github.com/NVIDIA/apex /tmp/apex && "
+        "cd /tmp/apex && "
+        "pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation "
+        '--config-settings "--global-option=--cpp_ext" '
+        '--config-settings "--global-option=--cuda_ext" . && '
+        "rm -rf /tmp/apex",
+    )
+    # Phase 5: MoGe depth model
+    .run_commands(
+        "pip install --no-cache-dir git+https://github.com/microsoft/MoGe.git",
+    )
+    # Phase 6: OpenCV fix + numpy pin
+    .run_commands(
+        "pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true",
+        "pip install --no-cache-dir opencv-python-headless==4.10.0.84",
+        "pip install --no-cache-dir 'numpy<2'",
+    )
+    # Verify
+    .run_commands(
+        'python -c "'
+        "import torch; "
+        "print(f'torch={torch.__version__}  cuda={torch.version.cuda}'); "
+        "assert torch.version.cuda is not None, 'No CUDA'; "
+        "print('GEN3C image OK')\"",
+    )
+)
+
+# ─────────────────────────────────────────────────────────────────────
+# Volumes (persistent caches for model weights)
+# ─────────────────────────────────────────────────────────────────────
 volume = modal.Volume.from_name("anysplat-cache", create_if_missing=True)
+gen3c_volume = modal.Volume.from_name("gen3c-cache", create_if_missing=True)
 
 
+# ═════════════════════════════════════════════════════════════════════
+# FUNCTION: process_image  (AnySplat — feed-forward 3DGS)
+# ═════════════════════════════════════════════════════════════════════
 @app.function(
-    image=image,
+    image=anysplat_image,
     gpu="A100",
     timeout=900,  # 15 minutes is plenty for feed-forward AnySplat
     volumes={"/cache": volume},
@@ -236,7 +328,260 @@ def process_image(image_bytes_list: list[bytes], filenames: list[str], prompt: s
         return ply_path.read_bytes()
 
 
-@app.function(image=image, gpu="A100", timeout=900, volumes={"/cache": volume})
+# ═════════════════════════════════════════════════════════════════════
+# FUNCTION: gen3c_generate_views  (GEN3C orbit video → frames)
+# ═════════════════════════════════════════════════════════════════════
+@app.function(
+    image=gen3c_image,
+    gpu="A100",
+    timeout=900,
+    volumes={"/cache": gen3c_volume},
+)
+def gen3c_generate_views(
+    image_bytes: bytes,
+    diffusion_steps: int = 12,
+    movement_distance: float = 0.2,
+    num_frames: int = 10,
+) -> list[bytes]:
+    """
+    Generate multi-view frames from a single image using NVIDIA GEN3C-Cosmos-7B.
+
+    Steps:
+      1. Download checkpoints (cached in volume after first run).
+      2. Predict depth with MoGe.
+      3. Create 3D cache and camera trajectory (clockwise orbit).
+      4. Generate 121-frame video with Gen3cPipeline.
+      5. Sample `num_frames` evenly-spaced JPEG frames.
+
+    Returns a list of JPEG byte buffers.
+    """
+    import io
+    import os
+    import sys
+    import tempfile
+    import time
+
+    import numpy as np
+    import torch
+    from PIL import Image
+
+    os.environ["TORCH_HOME"] = "/cache/torch"
+    os.environ["HF_HOME"] = "/cache/huggingface"
+
+    device = "cuda"
+    torch.enable_grad(False)
+
+    # GEN3C repo on the Python path
+    sys.path.insert(0, "/opt/gen3c")
+    os.chdir("/opt/gen3c")
+
+    from cosmos_predict1.utils import misc
+
+    misc.set_random_seed(42)
+
+    # ── Download checkpoints (cached in volume) ─────────────────────
+    ckpt_dir = "/cache/gen3c_checkpoints"
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    gen3c_dir = os.path.join(ckpt_dir, "Gen3C-Cosmos-7B")
+    tokenizer_dir = os.path.join(ckpt_dir, "Cosmos-Tokenize1-CV8x8x8-720p")
+
+    from huggingface_hub import snapshot_download
+
+    if not os.path.exists(os.path.join(gen3c_dir, "model.pt")):
+        print("📥 Downloading Gen3C-Cosmos-7B (~14 GB, first run only)...")
+        snapshot_download(
+            "nvidia/GEN3C-Cosmos-7B",
+            local_dir=gen3c_dir,
+            local_dir_use_symlinks=False,
+        )
+        print("✅ Gen3C-Cosmos-7B downloaded")
+
+    if not os.path.exists(os.path.join(tokenizer_dir, "mean_std.pt")):
+        print("📥 Downloading Cosmos tokenizer (~2 GB, first run only)...")
+        snapshot_download(
+            "nvidia/Cosmos-Tokenize1-CV8x8x8-720p",
+            local_dir=tokenizer_dir,
+            local_dir_use_symlinks=False,
+        )
+        print("✅ Cosmos tokenizer downloaded")
+
+    t0 = time.time()
+    print(f"🎬 GEN3C: steps={diffusion_steps}, dist={movement_distance}, out_frames={num_frames}")
+
+    # ── Load MoGe depth model ───────────────────────────────────────
+    from moge.model.v1 import MoGeModel
+
+    moge_model = MoGeModel.from_pretrained("Ruicheng/moge-vitl").to(device)
+
+    # ── Initialise Gen3cPipeline ────────────────────────────────────
+    from cosmos_predict1.diffusion.inference.gen3c_pipeline import Gen3cPipeline
+
+    pipeline = Gen3cPipeline(
+        inference_type="video2world",
+        checkpoint_dir=ckpt_dir,
+        checkpoint_name="Gen3C-Cosmos-7B",
+        enable_prompt_upsampler=False,
+        offload_network=True,
+        offload_tokenizer=True,
+        offload_text_encoder_model=True,
+        offload_prompt_upsampler=True,
+        offload_guardrail_models=True,
+        disable_guardrail=True,
+        disable_prompt_encoder=True,
+        guidance=1,
+        num_steps=diffusion_steps,
+        height=704,
+        width=1280,
+        fps=24,
+        num_video_frames=121,
+        seed=42,
+    )
+
+    t1 = time.time()
+    print(f"🎬 Pipeline loaded in {t1 - t0:.1f}s")
+
+    # ── Save input image to temp file ───────────────────────────────
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(image_bytes)
+        input_path = f.name
+
+    # ── Depth prediction (MoGe) ─────────────────────────────────────
+    from cosmos_predict1.diffusion.inference.depth_prediction import predict_moge_depth
+    from cosmos_predict1.utils.io import read_image
+
+    raw_image = read_image(input_path, use_imageio=True)
+    _, moge_image, moge_depth, moge_mask, moge_w2c, moge_intrinsics = (
+        predict_moge_depth(raw_image, 704, 1280, device, moge_model)
+    )
+
+    # ── 3D cache ────────────────────────────────────────────────────
+    from cosmos_predict1.diffusion.inference.cache_3d import Cache3D_Buffer
+
+    chunk = pipeline.model.chunk_size  # typically 121 for the 7B model
+
+    cache = Cache3D_Buffer(
+        frame_buffer_max=pipeline.model.frame_buffer_max,
+        generator=torch.Generator(device=device).manual_seed(42),
+        noise_aug_strength=0.0,
+        input_image=moge_image[:, 0].clone(),
+        input_depth=moge_depth[:, 0],
+        input_w2c=moge_w2c[:, 0],
+        input_intrinsics=moge_intrinsics[:, 0],
+        filter_points_threshold=0.05,
+        foreground_masking=True,
+    )
+
+    # ── Camera trajectory (clockwise orbit) ─────────────────────────
+    from cosmos_predict1.diffusion.inference.camera_utils import generate_camera_trajectory
+
+    gen_w2cs, gen_K = generate_camera_trajectory(
+        trajectory_type="clockwise",
+        initial_w2c=moge_w2c[0, 0],
+        initial_intrinsics=moge_intrinsics[0, 0],
+        num_frames=121,
+        movement_distance=movement_distance,
+        camera_rotation="center_facing",
+        center_depth=1.0,
+        device=device,
+    )
+
+    # ── Render warp images & generate first video chunk ─────────────
+    warp_imgs, warp_masks = cache.render_cache(
+        gen_w2cs[:, :chunk], gen_K[:, :chunk]
+    )
+
+    output = pipeline.generate(
+        prompt="",
+        image_path=input_path,
+        negative_prompt="",
+        rendered_warp_images=warp_imgs,
+        rendered_warp_masks=warp_masks,
+    )
+
+    if output is None:
+        raise RuntimeError("GEN3C generation failed (possible guardrail rejection)")
+
+    video = output[0]  # (T, H, W, 3) numpy uint8
+
+    t2 = time.time()
+    print(f"🎬 GEN3C produced {video.shape[0]} frames ({video.shape[1]}×{video.shape[2]}) in {t2 - t0:.1f}s")
+
+    # ── Extract evenly-spaced frames as JPEG bytes ──────────────────
+    T = video.shape[0]
+    indices = np.linspace(0, T - 1, num_frames, dtype=int)
+
+    frames: list[bytes] = []
+    for idx in indices:
+        buf = io.BytesIO()
+        Image.fromarray(video[idx]).save(buf, format="JPEG", quality=95)
+        frames.append(buf.getvalue())
+
+    os.unlink(input_path)
+    total_kb = sum(len(f) for f in frames) / 1024
+    print(f"🎬 Extracted {len(frames)} frames ({total_kb:.0f} KB total)")
+    return frames
+
+
+# ═════════════════════════════════════════════════════════════════════
+# FUNCTION: gen3c_pipeline  (orchestrator: GEN3C → AnySplat)
+#   Runs on a lightweight container — no GPU needed.
+#   Calls gen3c_generate_views.remote() then process_image.remote().
+# ═════════════════════════════════════════════════════════════════════
+@app.function(
+    image=modal.Image.debian_slim(python_version="3.10"),
+    timeout=1200,  # 20 min: GEN3C ~5 min + AnySplat ~2 min + headroom
+)
+def gen3c_pipeline(
+    image_bytes_list: list[bytes],
+    filenames: list[str],
+    diffusion_steps: int = 12,
+    movement_distance: float = 0.2,
+    prompt: str = "",
+    elevation: int = 20,
+) -> bytes:
+    """
+    Orchestrate: GEN3C multi-view video → AnySplat 3DGS reconstruction.
+
+    1. Send the first image to GEN3C to generate orbit video frames.
+    2. Feed those frames into AnySplat for dense 3D Gaussian Splat reconstruction.
+    3. Return the PLY bytes.
+    """
+    import time
+
+    t0 = time.time()
+    print(
+        f"🎬 GEN3C Pipeline started: "
+        f"steps={diffusion_steps}, dist={movement_distance}, "
+        f"images={len(image_bytes_list)}"
+    )
+
+    # Step 1 — GEN3C: generate multi-view frames (uses first image)
+    frames = gen3c_generate_views.remote(
+        image_bytes_list[0],
+        diffusion_steps=diffusion_steps,
+        movement_distance=movement_distance,
+        num_frames=10,
+    )
+    t1 = time.time()
+    print(f"🎬 GEN3C produced {len(frames)} frames in {t1 - t0:.1f}s")
+
+    # Step 2 — AnySplat: reconstruct 3DGS from those frames
+    frame_names = [f"gen3c_{i:03d}.jpg" for i in range(len(frames))]
+    ply_bytes = process_image.remote(frames, frame_names, prompt, elevation)
+    t2 = time.time()
+    print(
+        f"🔮 AnySplat processed {len(frames)} views in {t2 - t1:.1f}s. "
+        f"Total pipeline: {t2 - t0:.1f}s"
+    )
+
+    return ply_bytes
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ROUTER — single FastAPI endpoint (process / status / health)
+# ═════════════════════════════════════════════════════════════════════
+@app.function(image=anysplat_image, gpu="A100", timeout=900, volumes={"/cache": volume})
 @modal.fastapi_endpoint(method="POST")
 async def anysplat_router(request: dict) -> dict:
     """
@@ -244,6 +589,10 @@ async def anysplat_router(request: dict) -> dict:
     - op = \"process\" (default): start AnySplat job (sync or async)
     - op = \"status\": get status for an async job
     - op = \"health\": simple health check
+
+    GEN3C toggle (when op=process):
+    - gen3c_enabled = true  → runs gen3c_pipeline (GEN3C → AnySplat)
+    - gen3c_enabled = false → runs process_image directly (AnySplat only)
     """
     import base64
     from modal.functions import FunctionCall
@@ -269,11 +618,15 @@ async def anysplat_router(request: dict) -> dict:
             except Exception as e:
                 return {"status": "failed", "error": str(e)}
 
-        # Default: process new image(s)
-        # Supports both single image ("image" field) and multi-image ("images" array)
+        # ── op = "process" ──────────────────────────────────────────
         is_async = request.get("async", False)
         prompt = request.get("prompt", "")
         elevation = request.get("elevation", 20)
+
+        # GEN3C parameters
+        gen3c_enabled = bool(request.get("gen3c_enabled", False))
+        gen3c_diffusion_steps = int(request.get("gen3c_diffusion_steps", 12))
+        gen3c_movement_distance = float(request.get("gen3c_movement_distance", 0.2))
 
         # Collect images into lists
         images_b64: list[str] = []
@@ -291,20 +644,49 @@ async def anysplat_router(request: dict) -> dict:
         else:
             return {"error": "No image provided"}
 
-        print(
-            f"🔄 AnySplat process: {len(images_b64)} image(s), async={is_async}, "
-            f"filenames={filenames}"
-        )
-
         image_bytes_list = [base64.b64decode(b) for b in images_b64]
 
+        mode = "GEN3C → AnySplat" if gen3c_enabled else "AnySplat"
+        print(
+            f"🔄 {mode}: {len(images_b64)} image(s), async={is_async}, "
+            f"filenames={filenames}"
+        )
+        if gen3c_enabled:
+            print(
+                f"   GEN3C settings: steps={gen3c_diffusion_steps}, "
+                f"distance={gen3c_movement_distance}"
+            )
+
+        # ── Dispatch ────────────────────────────────────────────────
         if is_async:
-            call = process_image.spawn(image_bytes_list, filenames, prompt, elevation)
+            if gen3c_enabled:
+                call = gen3c_pipeline.spawn(
+                    image_bytes_list,
+                    filenames,
+                    gen3c_diffusion_steps,
+                    gen3c_movement_distance,
+                    prompt,
+                    elevation,
+                )
+            else:
+                call = process_image.spawn(image_bytes_list, filenames, prompt, elevation)
             return {"success": True, "call_id": call.object_id, "status": "processing"}
 
-        ply_bytes = process_image.remote(image_bytes_list, filenames, prompt, elevation)
-        ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
-        return {"success": True, "ply": ply_b64}
+        # Sync path
+        if gen3c_enabled:
+            ply_bytes = gen3c_pipeline.remote(
+                image_bytes_list,
+                filenames,
+                gen3c_diffusion_steps,
+                gen3c_movement_distance,
+                prompt,
+                elevation,
+            )
+        else:
+            ply_bytes = process_image.remote(image_bytes_list, filenames, prompt, elevation)
+
+            ply_b64 = base64.b64encode(ply_bytes).decode("utf-8")
+            return {"success": True, "ply": ply_b64}
 
     except Exception as e:
         import traceback
